@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 import google.generativeai as genai
 
 from config import (
+    get_env_var,
     DEFAULT_GEMINI_MODEL,
     OLLAMA_BASE_URL,
     OLLAMA_MODEL_NAME,
@@ -23,10 +24,10 @@ import os
 
 def get_gemini_api_key() -> Optional[str]:
     """
-    Récupère la clé API Gemini depuis la variable d'environnement GEMINI_API_KEY.
+    Récupère la clé API Gemini depuis les variables d'environnement
+    ou les secrets Streamlit (GEMINI_API_KEY ou GOOGLE_API_KEY).
     """
-    key = os.getenv("GEMINI_API_KEY", "").strip()
-    return key or None
+    return get_env_var(["GEMINI_API_KEY", "GOOGLE_API_KEY"])
 
 
 def configure_gemini(api_key: Optional[str] = None) -> None:

@@ -86,13 +86,15 @@ def render_geo_reformulation_tab():
 
     if not IS_PROD:
         st.markdown(f"*Environnement actuel* : `{GEO_ENV}`")
+    else:
+        st.caption("Environnement : production – backend Gemini 2.5-flash.")
 
     # Backend Selection
     col_backend, col_mode = st.columns(2)
     with col_backend:
         if IS_PROD:
             backend = "gemini"
-            st.caption(f"Moteur IA : Gemini (`{DEFAULT_GEMINI_MODEL}`)")
+            st.caption("Backend IA : Gemini (forcé en production).")
         else:
             backend_choice = st.radio(
                 "Moteur IA (Backend)",
@@ -398,13 +400,18 @@ def render_geo_monitoring_tab():
 
 
 def main():
-    """Point d'entrée de l'application Streamlit."""
     st.title("GEO Architect – Assistant MVP GEO")
 
-
-
+    # En mode DEV uniquement, on affiche les diagnostics LLM
     if not IS_PROD:
         render_backend_diagnostics()
+        st.warning("Environnement : DEV – ne pas utiliser en production.")
+    else:
+        # En PROD, simple message d'information
+        st.info(
+            "Cette version de GEO Architect utilise l’API Gemini en mode cloud. "
+            "Ne collez pas de données sensibles ou strictement confidentielles."
+        )
 
     tab1, tab2 = st.tabs(["🧠 GEO Reformulation", "📊 GEO Monitoring"])
 
