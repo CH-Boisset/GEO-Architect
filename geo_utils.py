@@ -24,8 +24,8 @@ import os
 
 def get_gemini_api_key() -> Optional[str]:
     """
-    Récupère la clé API Gemini depuis les variables d'environnement
-    ou les secrets Streamlit (GEMINI_API_KEY ou GOOGLE_API_KEY).
+    Récupère la clé API Gemini depuis les variables d'environnement.
+    On accepte GEMINI_API_KEY ou GOOGLE_API_KEY.
     """
     return get_env_var(["GEMINI_API_KEY", "GOOGLE_API_KEY"])
 
