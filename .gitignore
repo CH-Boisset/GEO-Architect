@@ -1,4 +1,23 @@
-.env
-__pycache__/
-.DS_Store
+# Environnement virtuel local
+.venv/
 .venv_geo/
+
+# Fichiers d'environnement
+.env
+.env.*
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Config éditeur
+.vscode/
+.idea/
+
+# Streamlit
+.streamlit/
+
+# Divers
+.DS_Store

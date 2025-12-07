@@ -1,5 +1,3 @@
-import json
-
 import streamlit as st
 
 from config import (
@@ -8,6 +6,7 @@ from config import (
     DEFAULT_GEMINI_MODEL,
     OLLAMA_MODEL_NAME,
     DEFAULT_BACKEND,
+    OLLAMA_BASE_URL,
 )
 from geo_utils import (
     geo_rewrite_content,
@@ -44,8 +43,7 @@ def render_backend_diagnostics() -> None:
 
         with col1:
             st.markdown("#### Ollama (local)")
-            st.code(f"Base URL : {st.session_state.get('OLLAMA_BASE_URL', 'http://localhost:11434')}\n"
-                    f"Modèle : {OLLAMA_MODEL_NAME}")
+            st.code(f"Base URL : {OLLAMA_BASE_URL}\nModèle : {OLLAMA_MODEL_NAME}")
             if st.button("🧪 Tester Ollama", key="test_ollama"):
                 msg = test_ollama_connection()
                 if "OK" in msg:
@@ -56,8 +54,8 @@ def render_backend_diagnostics() -> None:
         with col2:
             st.markdown("#### Gemini (cloud)")
             st.write(
-                "Le test utilisera la clé API définie dans les secrets Streamlit "
-                "ou celle saisie ci-dessous."
+                "Le test utilisera la clé API définie dans les variables d'environnement "
+                "ou dans les secrets Streamlit."
             )
             user_key = st.text_input(
                 "Clé API Gemini (optionnelle pour le test)",
@@ -87,16 +85,14 @@ def render_geo_reformulation_tab() -> None:
     """
     Interface principale de reformulation GEO.
 
-    Objectifs d'UI :
-    - Une bannière d'information claire en haut.
-    - Un "carton" d'intro GEO Reformulation pleine largeur.
-    - En dessous, grille 2 colonnes :
-        - À gauche (2/3) : Contenu à optimiser + Niveau de réécriture.
-        - À droite (1/3) : Texte GEO optimisé + bouton "Générer".
+    Layout :
+    - Bannière d'information Gemini.
+    - Carton d'intro GEO Reformulation pleine largeur.
+    - En dessous, grille :
+        - Colonne gauche (2/3) : Contenu à optimiser + Niveau de réécriture.
+        - Colonne droite (1/3) : Texte GEO optimisé + bouton Générer.
       La carte de droite occupe visuellement la hauteur des deux cartes de gauche.
-    - Respect automatique du mode sombre / clair de Streamlit (pas de CSS qui force un fond).
     """
-
     # Bannière d’avertissement sur l’usage de Gemini
     st.info(
         "Cette version de GEO Architect utilise l'API Gemini en mode cloud. "
@@ -134,7 +130,10 @@ def render_geo_reformulation_tab() -> None:
             )
             backend = "ollama" if "Ollama" in backend_choice else "gemini"
             if backend == "ollama":
-                st.caption(f"Modèle local : `{OLLAMA_MODEL_NAME}` (nécessite Ollama lancé en local).")
+                st.caption(
+                    f"Modèle local : `{OLLAMA_MODEL_NAME}` "
+                    "(nécessite Ollama lancé en local)."
+                )
             else:
                 st.caption(f"Modèle cloud : `{DEFAULT_GEMINI_MODEL}`.")
 
@@ -204,7 +203,7 @@ def render_geo_reformulation_tab() -> None:
                 st.session_state["geo_result"] = ""
                 st.session_state["geo_result_area"] = ""
 
-    # S'assurer que la zone de résultat part de la bonne valeur
+    # Synchroniser la valeur initiale AVANT la création du widget "geo_result_area"
     st.session_state["geo_result_area"] = st.session_state.get(
         "geo_result",
         st.session_state.get("geo_result_area", ""),
@@ -232,7 +231,7 @@ def render_geo_reformulation_tab() -> None:
                 height=320,
                 key="geo_result_area",
             )
-            # Synchronisation avec l'état interne
+            # Synchronisation avec l'état interne (on ne touche PAS à geo_result_area ici)
             st.session_state["geo_result"] = result_text
 
             st.markdown("---")
@@ -268,9 +267,9 @@ def render_geo_reformulation_tab() -> None:
                     backend=backend,
                     user_api_key=None,  # Clé gérée côté serveur (secrets / config)
                 )
+                # IMPORTANT : on met uniquement à jour geo_result,
+                # PAS geo_result_area (sinon erreur Streamlit).
                 st.session_state["geo_result"] = rewritten
-                st.session_state["geo_result_area"] = rewritten
-                # On force un rerun pour rafraîchir proprement la zone de texte & l'indicateur
                 st.rerun()
             except Exception as exc:
                 st.error(f"Erreur lors de la reformulation : {exc}")
@@ -284,7 +283,7 @@ def render_geo_reformulation_tab() -> None:
 
 
 # -----------------------------------------------------------------------------
-# ONGLET GEO MONITORING (inchangé dans la logique, juste léger polish UI)
+# ONGLET GEO MONITORING
 # -----------------------------------------------------------------------------
 def render_geo_monitoring_tab() -> None:
     st.header("📊 GEO Monitoring (simple)")
