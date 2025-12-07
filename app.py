@@ -165,7 +165,7 @@ def render_geo_reformulation_tab() -> None:
 
             target_query = st.text_input(
                 "Titre de section (ou requête cible simple)",
-                placeholder='"titre", "meta-titre", "slug", "meta-description", "h1", "h2", "h3", "faq"...',
+                placeholder='Ex : Titre de page, sous-titre, phrase d’accroche, etc.',
                 key="geo_target_query",
             )
 
