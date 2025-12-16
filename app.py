@@ -368,7 +368,7 @@ def render_geo_monitoring_tab() -> None:
 # MAIN
 # -----------------------------------------------------------------------------
 def main() -> None:
-    st.title("GEO Architect – Assistant MVP GEO")
+    st.title("GEO Architect – Assistant de reformulation GEO")
 
     # Diagnostics LLM (seulement en DEV)
     render_backend_diagnostics()
