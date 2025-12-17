@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 
 import streamlit as st
 import streamlit.components.v1 as components
-from streamlit_autorefresh import st_autorefresh
+
 
 st.set_page_config(page_title="GEO Architect", page_icon="🧠", layout="wide")
 
@@ -317,12 +317,15 @@ def render_geo_reformulation_tab() -> None:
 
     cooldown_placeholder = st.empty()
     if cooldown_remaining > 0:
-        # Auto-rerun chaque seconde tant que le cooldown est actif
-        st_autorefresh(interval=1000, key="cooldown_autorefresh")
         cooldown_placeholder.warning(
             f"Quota / limitation détectée. Réessayez dans {cooldown_remaining} seconde(s).",
             icon="⏳",
         )
+
+        # Minuteur live sans dépendance externe :
+        # on force un rerun après 1 seconde tant que le cooldown est actif.
+        time.sleep(1)
+        st.rerun()
     else:
         # Nettoie si on est passé à zéro
         if st.session_state.get("cooldown_until_ts", 0) != 0:
