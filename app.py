@@ -1,8 +1,10 @@
 import time
 import hashlib
+import json
 from typing import Any, Dict, Optional
 
 import streamlit as st
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="GEO Architect", page_icon="🧠", layout="wide")
 
@@ -103,6 +105,38 @@ def _make_sig(original_text: str, target_query: str, rewrite_mode: str, model_na
         ]
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def copy_to_clipboard_button(text: str, label: str = "📋 Copier le texte", key: str = "copy_btn") -> None:
+    """
+    Bouton de copie vers le presse-papiers utilisateur via l'API navigateur.
+    Fonctionne en HTTPS (Streamlit Cloud) et sur action utilisateur (clic).
+    """
+    t = (text or "")
+    disabled = not t.strip()
+
+    if st.button(label, use_container_width=True, disabled=disabled, key=key):
+        # json.dumps pour échapper correctement le texte (guillemets, retours ligne, etc.)
+        payload = json.dumps(t)
+        components.html(
+            f"""
+<script>
+(async () => {{
+  try {{
+    await navigator.clipboard.writeText({payload});
+  }} catch (e) {{
+    console.log("Clipboard error:", e);
+  }}
+}})();
+</script>
+            """,
+            height=0,
+        )
+        # Feedback UI côté Streamlit (indépendant du JS)
+        try:
+            st.toast("Texte copié dans le presse-papiers ✅")
+        except Exception:
+            st.success("Texte copié dans le presse-papiers ✅")
 
 
 # -----------------------------------------------------------------------------
@@ -307,6 +341,7 @@ def render_geo_reformulation_tab() -> None:
                 result_text = (last.get("text") or "")
 
             st.text_area("Résultat", height=520, value=result_text, disabled=True)
+            copy_to_clipboard_button(result_text, key="copy_geo_optimized_text")
 
             if isinstance(last, dict) and last.get("error"):
                 st.error(last["error"])
