@@ -51,6 +51,9 @@ DEFAULT_GEMINI_MODEL = get_env_var(
 GEMINI_MODEL_REFORMULATION = "gemini-2.5-flash"
 GEMINI_MODEL_MONITORING = "gemini-2.5-flash-lite"
 
+# Token admin UI (pour afficher la toolbar Streamlit uniquement à l'admin)
+ADMIN_UI_TOKEN = (get_env_var("ADMIN_UI_TOKEN", default="") or "").strip()
+
 # ---------------------------------------------------------------------------
 # CONFIG OLLAMA (LLM local pour le dev)
 # ---------------------------------------------------------------------------

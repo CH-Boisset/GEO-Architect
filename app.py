@@ -1,3 +1,7 @@
+import time
+import hashlib
+from typing import Any, Dict, Optional
+
 import streamlit as st
 
 st.set_page_config(page_title="GEO Architect", page_icon="🧠", layout="wide")
@@ -9,7 +13,9 @@ from config import (
     OLLAMA_MODEL_NAME,
     DEFAULT_BACKEND,
     OLLAMA_BASE_URL,
+    ADMIN_UI_TOKEN,
 )
+
 from geo_utils import (
     geo_rewrite_content,
     geo_is_text_already_optimized,
@@ -18,23 +24,92 @@ from geo_utils import (
     test_ollama_connection,
 )
 
+# -----------------------------------------------------------------------------
+# Admin UI (masquer toolbar/menu Streamlit pour users, garder pour admin)
+# -----------------------------------------------------------------------------
+
+def _get_query_param(name: str) -> Optional[str]:
+    try:
+        qp = st.query_params  # type: ignore[attr-defined]
+        val = qp.get(name)
+        if isinstance(val, list):
+            return val[0] if val else None
+        return val
+    except Exception:
+        qp = st.experimental_get_query_params()
+        val_list = qp.get(name, [])
+        return val_list[0] if val_list else None
+
+
+def _apply_user_css_hide_toolbar() -> None:
+    st.markdown(
+        """
+<style>
+#MainMenu {visibility: hidden;}
+[data-testid="stToolbarActions"] {display: none !important;}
+header [data-testid="stToolbar"] {display: none !important;}
+footer {visibility: hidden;}
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _is_admin_session() -> bool:
+    token = (ADMIN_UI_TOKEN or "").strip()
+    if not token:
+        return False
+    admin_qp = _get_query_param("admin") or ""
+    return admin_qp == token
+
 
 # -----------------------------------------------------------------------------
-# CONFIG GLOBALE STREAMLIT
+# Session state init (anti double-clic / cache / flags)
 # -----------------------------------------------------------------------------
-# Rien ici : st.set_page_config est déjà appelé tout en haut (exigence Streamlit).
+
+def _init_state() -> None:
+    defaults = {
+        "rewrite_cache": {},              # sig -> result dict
+        "rewrite_inflight": False,
+        "pending_action": None,           # "generate"
+        "pending_payload": None,          # dict
+        "last_request_sig": "",
+        "last_request_ts": 0.0,
+        "cooldown_until_ts": 0.0,         # 429 cooldown
+        "last_result": None,              # dernier dict résultat
+        "optimized_gate": None,           # dict si pré-check déclenche
+        "force_after_optimized": False,   # si l’utilisateur force
+        "pending_set_mode_label": None,   # SAFE: set widget state before widget creation
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+def _norm_for_sig(text: str) -> str:
+    t = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    t = "\n".join(" ".join(line.split()) for line in t.split("\n"))
+    return t
+
+
+def _make_sig(original_text: str, target_query: str, rewrite_mode: str, model_name: str, backend: str) -> str:
+    payload = "||".join(
+        [
+            _norm_for_sig(original_text),
+            _norm_for_sig(target_query),
+            (rewrite_mode or "").strip().lower(),
+            (model_name or "").strip(),
+            (backend or "").strip().lower(),
+        ]
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 # -----------------------------------------------------------------------------
-# BLOCS UTILITAIRES
+# Diagnostics (DEV)
 # -----------------------------------------------------------------------------
+
 def render_backend_diagnostics() -> None:
-    """
-    Petit bloc de diagnostic pour vérifier rapidement les backends LLM.
-
-    - En environnement PROD : on ne montre rien (interface plus simple).
-    - En DEV : permet de tester Ollama et Gemini.
-    """
     if IS_PROD:
         return
 
@@ -47,10 +122,7 @@ def render_backend_diagnostics() -> None:
         st.caption(f"Base URL : `{OLLAMA_BASE_URL}` · Modèle : `{OLLAMA_MODEL_NAME}`")
         if st.button("Tester Ollama", key="diag_test_ollama"):
             ok, msg = test_ollama_connection()
-            if ok:
-                st.success(msg)
-            else:
-                st.error(msg)
+            st.success(msg) if ok else st.error(msg)
 
     with col2:
         st.markdown("#### Gemini (cloud)")
@@ -58,49 +130,23 @@ def render_backend_diagnostics() -> None:
             "Le test utilisera la clé API définie dans les variables d'environnement "
             "ou dans les secrets Streamlit."
         )
-        user_key = st.text_input(
-            "Clé API Gemini (optionnelle pour le test)",
-            type="password",
-            key="diag_gemini_key",
-        )
+        user_key = st.text_input("Clé API Gemini (optionnelle pour le test)", type="password", key="diag_gemini_key")
         if st.button("Tester Gemini", key="diag_test_gemini"):
             ok, msg = test_gemini_connection(api_key=user_key or None)
-            if ok:
-                st.success(msg)
-            else:
-                st.error(msg)
+            st.success(msg) if ok else st.error(msg)
 
 
 # -----------------------------------------------------------------------------
-# ONGLET GEO REFORMULATION
+# GEO Reformulation tab
 # -----------------------------------------------------------------------------
+
 def render_geo_reformulation_tab() -> None:
-    """
-    Interface principale de reformulation GEO.
-    """
-    # Bannière d’avertissement sur l’usage de Gemini
     st.info(
         "Cette version de GEO Architect utilise l'API Gemini en mode cloud. "
         "Ne collez pas de données sensibles ou strictement confidentielles.",
         icon="ℹ️",
     )
 
-    # Carton d'intro pleine largeur
-    with st.container(border=True):
-        left, right = st.columns([0.1, 0.9])
-        with left:
-            st.markdown("### ✨")
-        with right:
-            st.markdown("### GEO Reformulation")
-            st.write(
-                "Colle un contenu existant, renseigne un titre de section (ou une requête cible simple), "
-                "puis laisse l'assistant générer une version optimisée GEO : neutre, factuelle, structurée, "
-                "prête à être exploitée par des moteurs IA."
-            )
-
-    # Sélection du backend :
-    # - En PROD : toujours Gemini, on ne montre pas l'option.
-    # - En DEV : possibilité de choisir entre Ollama et Gemini.
     if IS_PROD:
         backend = "gemini"
     else:
@@ -113,255 +159,211 @@ def render_geo_reformulation_tab() -> None:
                 horizontal=True,
                 key="backend_radio",
             )
-            backend = "ollama" if "Ollama" in backend_choice else "gemini"
-            if backend == "ollama":
-                st.caption(
-                    f"Modèle local : `{OLLAMA_MODEL_NAME}` "
-                    "(nécessite Ollama lancé en local)."
-                )
-            else:
-                st.caption(f"Modèle cloud : `{DEFAULT_GEMINI_MODEL}`.")
+        backend = "ollama" if backend_choice.startswith("Ollama") else "gemini"
 
-    # Initialisation du state pour le résultat
-    if "geo_result" not in st.session_state:
-        st.session_state["geo_result"] = ""
-    if "geo_result_area" not in st.session_state:
-        st.session_state["geo_result_area"] = ""
-    if "previous_rewrite_mode" not in st.session_state:
-        st.session_state["previous_rewrite_mode"] = "ameliorer"
-
-    # Etat interne pour le "pré-check GEO" (binaire et conservateur)
-    # - Si on est *certain* que le texte est déjà GEO-friendly : on propose de NE PAS reformuler.
-    # - Au moindre doute : on laisse la reformulation se faire normalement.
-    if "geo_optimized_block" not in st.session_state:
-        st.session_state["geo_optimized_block"] = False
-    if "geo_optimized_sig" not in st.session_state:
-        st.session_state["geo_optimized_sig"] = ("", "")
-    if "geo_skip_notice" not in st.session_state:
-        st.session_state["geo_skip_notice"] = False
-
-    # Mapping des labels -> valeurs internes
-    mode_label_to_value = {
-        "Réécriture minimale": "minimal",
-        "Améliorer la tournure": "ameliorer",
-        "Proposition créative": "creatif",
-    }
-
-    # Grille principale : gauche (inputs) / droite (résultat)
     col_main, col_result = st.columns([2, 1])
 
-    # -------------------------
-    # COLONNE GAUCHE
-    # -------------------------
     with col_main:
-        # Carte "Contenu à optimiser"
         with st.container(border=True):
             st.markdown("#### Contenu à optimiser")
 
             target_query = st.text_input(
-                "Titre de section (ou requête cible simple)",
-                placeholder="Ex : Titre de page, sous-titre, phrase d’accroche, etc.",
+                "Titre de section (ou intention / requête cible)",
+                placeholder="Ex : histoire de Maison Boisset, qui est Jean-Charles Boisset, etc.",
                 key="geo_target_query",
             )
 
             original_text = st.text_area(
                 "Texte original",
-                height=260,
-                placeholder=(
-                    "Coller le texte brut ici, par exemple un contenu créé par un autre service, "
-                    "Google Trends, ChatGPT..."
-                ),
+                height=320,
+                placeholder="Collez ici le texte à reformuler (texte brut).",
                 key="geo_original_text",
             )
 
-        # Si l’utilisateur modifie le texte ou la requête, on invalide le pré-check précédent.
-        current_sig = ((original_text or "").strip(), (target_query or "").strip())
-        if st.session_state.get("geo_optimized_sig") != current_sig:
-            st.session_state["geo_optimized_block"] = False
-            st.session_state["geo_skip_notice"] = False
+    # SAFE: appliquer une éventuelle demande de mode AVANT la création du widget selectbox
+    if st.session_state.get("pending_set_mode_label"):
+        st.session_state["geo_rewrite_mode_label"] = st.session_state["pending_set_mode_label"]
+        st.session_state["pending_set_mode_label"] = None
 
-        # Carte "Niveau de réécriture"
+    if st.session_state["force_after_optimized"]:
+        mode_label_to_value = {
+            "Réécriture minimale (Conserver au maximum le texte d'origine)": "minimal",
+            "Améliorer la tournure (Modification du texte d'origine)": "ameliorer",
+            "Proposition créative (Proposition très différente du texte d'origine)": "creatif",
+        }
+        mode_labels = list(mode_label_to_value.keys())
+        default_label = "Réécriture minimale (Conserver au maximum le texte d'origine)"
+    else:
+        mode_label_to_value = {
+            "Réécriture minimale": "minimal",
+            "Améliorer la tournure": "ameliorer",
+            "Proposition créative": "creatif",
+        }
+        mode_labels = list(mode_label_to_value.keys())
+        default_label = "Améliorer la tournure"
+
+    if "geo_rewrite_mode_label" not in st.session_state:
+        st.session_state["geo_rewrite_mode_label"] = default_label
+    if st.session_state.get("geo_rewrite_mode_label") not in mode_labels:
+        st.session_state["geo_rewrite_mode_label"] = default_label
+
+    with col_main:
         with st.container(border=True):
             st.markdown("#### Niveau de réécriture")
-
             mode_label = st.selectbox(
                 "Choix du niveau",
-                list(mode_label_to_value.keys()),
-                index=1,  # "Améliorer la tournure" par défaut
+                mode_labels,
+                index=mode_labels.index(st.session_state["geo_rewrite_mode_label"]),
                 key="geo_rewrite_mode_label",
             )
             rewrite_mode = mode_label_to_value[mode_label]
+            if st.session_state["force_after_optimized"]:
+                st.caption("Vous avez choisi de reformuler malgré l'alerte \"Texte déjà optimisé\".")
 
-            st.caption(
-                "• **Réécriture minimale** : corrections et ajustements très légers.\n"
-                "• **Améliorer la tournure** : texte plus fluide, même contenu.\n"
-                "• **Proposition créative** : style plus travaillé, toujours factuel."
-            )
+    now = time.time()
+    cooldown_remaining = max(0, int(st.session_state["cooldown_until_ts"] - now))
+    if cooldown_remaining > 0:
+        st.warning(f"Quota / limitation détectée. Réessayez dans ~{cooldown_remaining} secondes.", icon="⏳")
 
-            # Reset du résultat si le mode change
-            if st.session_state["previous_rewrite_mode"] != rewrite_mode:
-                st.session_state["previous_rewrite_mode"] = rewrite_mode
-                st.session_state["geo_result"] = ""
-                st.session_state["geo_result_area"] = ""
-                st.session_state["geo_optimized_block"] = False
-                st.session_state["geo_skip_notice"] = False
-
-    # Synchroniser la valeur initiale AVANT la création du widget "geo_result_area"
-    st.session_state["geo_result_area"] = st.session_state.get(
-        "geo_result",
-        st.session_state.get("geo_result_area", ""),
-    )
-
-    # -------------------------
-    # COLONNE DROITE
-    # -------------------------
-    generate_button_clicked = False
-    force_generate_clicked = False
+    gate = st.session_state.get("optimized_gate")
+    gate_matches = False
+    if isinstance(gate, dict):
+        current_sig = _make_sig(original_text, target_query, rewrite_mode, DEFAULT_GEMINI_MODEL, backend)
+        gate_matches = bool(gate.get("sig") and gate.get("sig") == current_sig)
 
     with col_result:
         with st.container(border=True):
-            header_cols = st.columns([0.8, 0.2])
-            with header_cols[0]:
-                st.markdown("#### Texte GEO optimisé")
-            with header_cols[1]:
-                # petit indicateur "prêt" si on a déjà un texte
-                if st.session_state.get("geo_result"):
-                    st.markdown("✅\n\n*Texte prêt*")
-                else:
-                    st.markdown("📝\n\n*En attente*")
+            st.markdown("#### Texte GEO optimisé")
 
-            # Message "texte déjà optimisé" (binaire) : on s'arrête ici et on demande confirmation.
-            # NB : au moindre doute, on ne bloque pas et on laisse la reformulation se faire.
-            if st.session_state.get("geo_skip_notice"):
-                st.success("OK — texte conservé (aucune reformulation lancée).")
-                st.session_state["geo_skip_notice"] = False
+            last = st.session_state.get("last_result") or {}
+            if isinstance(last, dict):
+                if last.get("already_optimized"):
+                    st.caption("🏷️ **Texte déjà optimisé**")
+                if last.get("repaired"):
+                    st.caption("🛠️ **Sortie réparée**")
 
-            if (
-                st.session_state.get("geo_optimized_block")
-                and st.session_state.get("geo_optimized_sig") == current_sig
-            ):
+            if gate_matches:
                 st.warning(
-                    "Le texte original est déjà optimisé pour le GEO. Voulez-vous une reformulation quand même ?",
+                    "Le texte original semble déjà optimisé pour le GEO, voulez-vous une reformulation quand même ?",
                     icon="🧠",
                 )
-
-                action_cols = st.columns(2)
-                with action_cols[0]:
-                    if st.button(
-                        "✅ Ne pas reformuler (recommandé)",
-                        use_container_width=True,
-                        key="geo_skip_rewrite_btn",
-                    ):
-                        st.session_state["geo_optimized_block"] = False
-                        st.session_state["geo_skip_notice"] = True
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button("Ne pas reformuler (recommandé)", use_container_width=True, key="btn_skip_rewrite"):
+                        st.session_state["last_result"] = {
+                            "text": original_text,
+                            "already_optimized": True,
+                            "similarity": 1.0,
+                            "repaired": False,
+                            "violations": [],
+                            "cooldown_seconds": None,
+                            "error": None,
+                        }
+                        st.session_state["optimized_gate"] = None
+                        st.session_state["force_after_optimized"] = False
+                        st.rerun()
+                with b2:
+                    if st.button("Reformuler quand même", use_container_width=True, key="btn_force_rewrite"):
+                        # SAFE: ne pas modifier la clé du selectbox après instanciation
+                        st.session_state["force_after_optimized"] = True
+                        st.session_state["pending_set_mode_label"] = "Réécriture minimale (Conserver au maximum le texte d'origine)"
+                        st.session_state["optimized_gate"] = None
                         st.rerun()
 
-                with action_cols[1]:
-                    force_generate_clicked = st.button(
-                        "✍️ Reformuler quand même",
-                        use_container_width=True,
-                        key="geo_force_rewrite_btn",
-                    )
+            result_text = ""
+            if isinstance(last, dict):
+                result_text = (last.get("text") or "")
 
-                with st.expander(
-                    "Niveaux de réécriture (si vous forcez la reformulation)",
-                    expanded=False,
-                ):
-                    st.markdown(
-                        "• **Réécriture minimale** : conserver au maximum le texte d’origine.\n"
-                        "• **Améliorer la tournure** : modification du texte d’origine (mêmes idées).\n"
-                        "• **Proposition créative** : proposition très différente du texte d’origine (toujours factuelle)."
-                    )
-                    st.caption("Suggestion : commencez par *Réécriture minimale* pour limiter les changements.")
-                    st.caption(
-                        "Vous pouvez ajuster le niveau dans la carte \"Niveau de réécriture\" (colonne gauche)."
-                    )
+            st.text_area("Résultat", height=520, value=result_text, disabled=True)
 
-            result_text = st.text_area(
-                "Résultat",
-                height=320,
-                key="geo_result_area",
-            )
-            # Synchronisation avec l'état interne (on ne touche PAS à geo_result_area ici)
-            st.session_state["geo_result"] = result_text
+            if isinstance(last, dict) and last.get("error"):
+                st.error(last["error"])
+            if isinstance(last, dict) and last.get("violations"):
+                with st.expander("Voir les contrôles de conformité (violations)"):
+                    st.write(last.get("violations"))
 
-            st.markdown("---")
-            generate_button_clicked = st.button(
-                "✨ Générer",
-                type="primary",
-                use_container_width=True,
-                key="geo_generate_button",
-            )
+    disable_generate = st.session_state["rewrite_inflight"] or cooldown_remaining > 0 or gate_matches
+    btn_label = "🧠 Générer" if not st.session_state["force_after_optimized"] else "🧠 Lancer la reformulation"
 
-            if result_text:
-                st.success("Texte optimisé généré avec succès !")
+    if st.button(btn_label, type="primary", disabled=disable_generate, key="btn_generate"):
+        sig = _make_sig(original_text, target_query, rewrite_mode, DEFAULT_GEMINI_MODEL, backend)
 
-    # -------------------------
-    # LOGIQUE D'APPEL LLM (APRÈS LE LAYOUT)
-    # -------------------------
-    if generate_button_clicked or force_generate_clicked:
-        if not original_text or not original_text.strip():
-            st.warning("Merci de coller un texte à reformuler.")
-            return
+        if (time.time() - float(st.session_state["last_request_ts"])) < 2.0 and sig == st.session_state["last_request_sig"]:
+            st.info("Requête identique déjà en cours / trop rapprochée. Patientez une seconde.", icon="🛑")
+        else:
+            st.session_state["last_request_sig"] = sig
+            st.session_state["last_request_ts"] = time.time()
 
-        if not target_query or not target_query.strip():
-            st.warning("Merci de préciser un titre de section ou une requête cible.")
-            return
+            if (not st.session_state["force_after_optimized"]) and target_query.strip() and original_text.strip():
+                if geo_is_text_already_optimized(original_text=original_text, target_query=target_query):
+                    st.session_state["optimized_gate"] = {"sig": sig}
+                    st.rerun()
 
-        # Pré-check heuristique (binaire) : on ne bloque QUE si on est certain que le texte est déjà GEO-friendly.
-        # Au moindre doute : on laisse la reformulation se faire (fail-open).
-        if not force_generate_clicked:
-            try:
-                already_optimized = geo_is_text_already_optimized(
-                    original_text=original_text,
-                    target_query=target_query,
-                )
-            except Exception:
-                already_optimized = False
-
-            if already_optimized:
-                st.session_state["geo_optimized_block"] = True
-                st.session_state["geo_optimized_sig"] = current_sig
-                # Suggestion : basculer en réécriture minimale si l’utilisateur force malgré tout.
-                st.session_state["geo_rewrite_mode_label"] = "Réécriture minimale"
-                st.session_state["previous_rewrite_mode"] = "minimal"
-                st.session_state["geo_skip_notice"] = False
+            cache: Dict[str, Any] = st.session_state["rewrite_cache"]
+            if sig in cache:
+                st.session_state["last_result"] = cache[sig]
                 st.rerun()
 
-        # Ici : soit on force la reformulation, soit le texte n'est pas détecté "déjà optimisé".
-        st.session_state["geo_optimized_block"] = False
+            st.session_state["pending_action"] = "generate"
+            st.session_state["pending_payload"] = {
+                "sig": sig,
+                "original_text": original_text,
+                "target_query": target_query,
+                "rewrite_mode": rewrite_mode,
+                "backend": backend,
+                "model_name": DEFAULT_GEMINI_MODEL,
+            }
+            st.session_state["rewrite_inflight"] = True
+            st.rerun()
+
+    if st.session_state.get("pending_action") == "generate" and isinstance(st.session_state.get("pending_payload"), dict):
+        payload = st.session_state["pending_payload"]
+        st.session_state["pending_action"] = None
+        st.session_state["pending_payload"] = None
 
         with st.spinner("Génération de la version GEO en cours..."):
             try:
-                rewritten = geo_rewrite_content(
-                    original_text=original_text,
-                    target_query=target_query,
-                    model_name=None,  # Laisse geo_utils choisir le modèle par défaut
-                    rewrite_mode=rewrite_mode,
-                    backend=backend,
-                    user_api_key=None,  # Clé gérée côté serveur (secrets / config)
+                res = geo_rewrite_content(
+                    original_text=payload["original_text"],
+                    target_query=payload["target_query"],
+                    model_name=payload.get("model_name"),
+                    rewrite_mode=payload["rewrite_mode"],
+                    backend=payload["backend"],
+                    user_api_key=None,
                 )
-                # IMPORTANT : on met uniquement à jour geo_result,
-                # PAS geo_result_area (sinon erreur Streamlit).
-                st.session_state["geo_result"] = rewritten
-                st.rerun()
+
+                cd = res.get("cooldown_seconds")
+                if cd:
+                    st.session_state["cooldown_until_ts"] = time.time() + int(cd)
+
+                st.session_state["last_result"] = res
+                st.session_state["rewrite_cache"][payload["sig"]] = res
+
             except Exception as exc:
-                st.error(f"Erreur lors de la reformulation : {exc}")
+                st.session_state["last_result"] = {
+                    "text": payload.get("original_text", ""),
+                    "already_optimized": False,
+                    "similarity": 0.0,
+                    "repaired": False,
+                    "violations": [],
+                    "cooldown_seconds": None,
+                    "error": f"Erreur lors de la reformulation : {exc}",
+                }
+            finally:
+                st.session_state["rewrite_inflight"] = False
+                st.session_state["force_after_optimized"] = False
 
-    # Pied de page informatif
-    st.caption(
-        f"Modèle IA : `{DEFAULT_GEMINI_MODEL}` (Gemini) · "
-        f"Environnement : `{GEO_ENV}` · "
-        "Backend IA : Gemini (forcé en production)."
-    )
+        st.rerun()
+
+    st.caption(f"Modèle IA : `{DEFAULT_GEMINI_MODEL}` · Environnement : `{GEO_ENV}` · Backend IA : Gemini (forcé en production).")
 
 
 # -----------------------------------------------------------------------------
-# ONGLET GEO MONITORING
+# GEO Monitoring tab
 # -----------------------------------------------------------------------------
+
 def render_geo_monitoring_tab() -> None:
     st.header("📊 GEO Monitoring (simple)")
-
     st.write(
         "Monitoring simple des résultats (DuckDuckGo HTML). "
         "Limites : blocages, CAPTCHA, variations HTML, etc."
@@ -375,51 +377,34 @@ def render_geo_monitoring_tab() -> None:
             key="monitor_queries",
         )
         brand_or_domain = st.text_input(
-            "Marque ou domaine à détecter",
-            placeholder="Ex : boisset ou boisset.com",
+            "Marque ou domaine à chercher (dans title / URL / snippet)",
+            placeholder="Ex : boisset.com ou 'Maison Boisset'",
             key="monitor_brand",
         )
-
-        max_results = st.slider(
-            "Nombre max de résultats analysés par requête",
-            min_value=3,
-            max_value=20,
-            value=10,
-        )
-
+        max_results = st.slider("Nombre max de résultats analysés par requête", 3, 20, 10)
         submitted = st.form_submit_button("🔍 Lancer le monitoring")
 
     if not submitted:
         return
 
-    # Traitement une fois le formulaire soumis
     queries = [line.strip() for line in (queries_text or "").splitlines() if line.strip()]
-
     if not queries:
-        st.warning("Merci de saisir au moins une requête.")
+        st.warning("Ajoutez au moins une requête.", icon="⚠️")
         return
-    if not brand_or_domain.strip():
-        st.warning("Merci de saisir une marque ou un domaine à détecter.")
+    if not (brand_or_domain or "").strip():
+        st.warning("Ajoutez une marque ou un domaine à chercher.", icon="⚠️")
         return
 
-    with st.spinner("Analyse des résultats..."):
+    with st.spinner("Analyse des résultats DuckDuckGo..."):
         try:
-            df = monitor_keywords(
-                queries=queries,
-                brand_or_domain=brand_or_domain,
-                max_results=max_results,
-            )
+            df = monitor_keywords(queries=queries, brand_or_domain=brand_or_domain, max_results=max_results)
         except Exception as exc:
-            st.error(f"Erreur pendant le monitoring : {exc}")
+            st.error(f"Erreur monitoring : {exc}")
             return
 
-    if df.empty:
-        st.info("Aucun résultat récupéré (scraping bloqué ou aucun résultat).")
+    if df is None or df.empty:
+        st.info("Aucun résultat (ou blocage / HTML inattendu).")
         return
-
-    hits = int(df["brand_present"].sum())
-    total = int(len(df))
-    st.metric("Mentions détectées", f"{hits}/{total}")
 
     st.subheader("Résultats détaillés")
     st.dataframe(df, use_container_width=True)
@@ -436,16 +421,21 @@ def render_geo_monitoring_tab() -> None:
 
 
 # -----------------------------------------------------------------------------
-# MAIN
+# Main
 # -----------------------------------------------------------------------------
-def main() -> None:
-    st.title("GEO Architect – Assistant de reformulation GEO")
 
-    # Diagnostics LLM (seulement en DEV)
+def main() -> None:
+    _init_state()
+
+    if not _is_admin_session():
+        _apply_user_css_hide_toolbar()
+
+    st.title("GEO Architect")
+    st.caption("MVP · Reformulation GEO + Monitoring simple")
+
     render_backend_diagnostics()
 
     tab1, tab2 = st.tabs(["🧠 GEO Reformulation", "📊 GEO Monitoring"])
-
     with tab1:
         render_geo_reformulation_tab()
     with tab2:
