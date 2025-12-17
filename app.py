@@ -202,20 +202,27 @@ def render_geo_reformulation_tab() -> None:
         mode_labels = list(mode_label_to_value.keys())
         default_label = "Améliorer la tournure"
 
-    if "geo_rewrite_mode_label" not in st.session_state:
-        st.session_state["geo_rewrite_mode_label"] = default_label
-    if st.session_state.get("geo_rewrite_mode_label") not in mode_labels:
-        st.session_state["geo_rewrite_mode_label"] = default_label
+    default_index = mode_labels.index(default_label)
 
     with col_main:
         with st.container(border=True):
             st.markdown("#### Niveau de réécriture")
-            mode_label = st.selectbox(
-                "Choix du niveau",
-                mode_labels,
-                index=mode_labels.index(st.session_state["geo_rewrite_mode_label"]),
-                key="geo_rewrite_mode_label",
-            )
+
+            # IMPORTANT : ne pas fournir index=... si le widget est déjà piloté via session_state (clé existante)
+            if "geo_rewrite_mode_label" in st.session_state and st.session_state["geo_rewrite_mode_label"] in mode_labels:
+                mode_label = st.selectbox(
+                    "Choix du niveau",
+                    mode_labels,
+                    key="geo_rewrite_mode_label",
+                )
+            else:
+                mode_label = st.selectbox(
+                    "Choix du niveau",
+                    mode_labels,
+                    index=default_index,
+                    key="geo_rewrite_mode_label",
+                )
+
             rewrite_mode = mode_label_to_value[mode_label]
             if st.session_state["force_after_optimized"]:
                 st.caption("Vous avez choisi de reformuler malgré l'alerte \"Texte déjà optimisé\".")
