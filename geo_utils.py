@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import List, Optional, Dict, Any
+from dataclasses import dataclass
+from functools import lru_cache
+from typing import Any, Dict, List, Optional
+import urllib.parse
+import re
 
 import requests
-import pandas as pd
-from bs4 import BeautifulSoup
-import google.generativeai as genai
 
 from config import (
     get_env_var,
@@ -15,87 +16,216 @@ from config import (
     OLLAMA_MODEL_NAME,
 )
 
+# ---------------------------------------------------------------------------
+# Lazy imports (évite que l'app crashe au chargement si une lib manque)
+# ---------------------------------------------------------------------------
 
-# =========================
-# LLM - GEMINI (CLOUD)
-# =========================
-
-import os
-
-def get_gemini_api_key() -> Optional[str]:
-    """
-    Récupère la clé API Gemini depuis les variables d'environnement.
-    On accepte GEMINI_API_KEY ou GOOGLE_API_KEY.
-    """
-    return get_env_var(["GEMINI_API_KEY", "GOOGLE_API_KEY"])
-
-
-def configure_gemini(api_key: Optional[str] = None) -> None:
-    """
-    Configure la librairie google-generativeai avec la clé API fournie
-    ou celle présente dans les variables d'environnement.
-    """
-    key = (api_key or get_gemini_api_key() or "").strip()
-    if not key:
-        raise RuntimeError(
-            "Aucune clé API Gemini trouvée. "
-            "Définis GEMINI_API_KEY (ou GOOGLE_API_KEY) dans ton environnement "
-            "ou fournis une clé via l'interface."
-        )
-
+def _lazy_import_genai():
     try:
-        genai.configure(api_key=key)
-    except Exception as exc:
-        raise RuntimeError(f"Erreur lors de la configuration de Gemini : {exc}") from exc
-
-
-def get_gemini_model(model_name: str) -> genai.GenerativeModel:
-    """
-    Instancie un modèle Gemini à partir de son nom.
-    """
-    try:
-        return genai.GenerativeModel(model_name)
+        import google.generativeai as genai  # type: ignore
+        return genai
     except Exception as exc:
         raise RuntimeError(
-            f"Impossible d'instancier le modèle Gemini '{model_name}' : {exc}"
+            "Import google-generativeai impossible. "
+            "Vérifie que 'google-generativeai' est bien dans requirements.txt."
         ) from exc
 
 
-# =========================
-# LLM - OLLAMA (LOCAL)
-# =========================
+def _lazy_import_bs4():
+    try:
+        from bs4 import BeautifulSoup  # type: ignore
+        return BeautifulSoup
+    except Exception as exc:
+        raise RuntimeError(
+            "Import BeautifulSoup impossible. "
+            "Vérifie que 'beautifulsoup4' est bien dans requirements.txt."
+        ) from exc
+
+
+def _lazy_import_pandas():
+    try:
+        import pandas as pd  # type: ignore
+        return pd
+    except Exception as exc:
+        raise RuntimeError(
+            "Import pandas impossible. "
+            "Vérifie que 'pandas' est bien dans requirements.txt."
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
+# GEO Heuristics (Added Hotfix)
+# ---------------------------------------------------------------------------
+
+def geo_is_text_already_optimized(original_text: str, target_query: str) -> bool:
+    """
+    Détection heuristique BINAIRE et CONSERVATRICE :
+    - True UNIQUEMENT si l’on est très confiant que le texte est déjà GEO-friendly.
+    - Au moindre doute : False  => on reformule.
+    """
+    try:
+        text = (original_text or "").strip()
+        query = (target_query or "").strip()
+        if not text or not query:
+            return False
+
+        # 1) Texte suffisamment long (seuil conservateur)
+        words = re.findall(r"[0-9A-Za-zÀ-ÖØ-öø-ÿ]+", text)
+        if len(words) < 80:
+            return False
+
+        # 2) Structure : >= 2 paragraphes + (titre OU liste)
+        paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+        if len(paragraphs) < 2:
+            return False
+
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        has_heading = any(
+            ln.startswith("#") or (ln.isupper() and 8 <= len(ln) <= 80)
+            for ln in lines
+        )
+        has_bullets = any(re.match(r"^(\-|\*|•|\d+[\.|\)])\s+", ln) for ln in lines)
+        if not (has_heading or has_bullets):
+            return False
+
+        # 3) Lisibilité : éviter phrases trop longues
+        sentences = [s.strip() for s in re.split(r"[\.\!\?]\s+", text) if s.strip()]
+        if len(sentences) < 3:
+            return False
+        sent_lens = [len(re.findall(r"[0-9A-Za-zÀ-ÖØ-öø-ÿ]+", s)) for s in sentences]
+        avg_len = sum(sent_lens) / max(1, len(sent_lens))
+        if avg_len > 28:
+            return False
+        if max(sent_lens) > 45:
+            return False
+
+        # 4) Couverture sémantique : présence forte des tokens de requête
+        stop = {
+            "le", "la", "les", "un", "une", "des", "du", "de", "d", "l",
+            "et", "ou", "mais", "donc", "or", "ni", "car",
+            "à", "au", "aux", "en", "dans", "sur", "sous", "avec", "sans", "pour", "par",
+            "ce", "cet", "cette", "ces", "son", "sa", "ses", "leur", "leurs",
+            "qui", "que", "quoi", "dont", "où",
+            "est", "sont", "été", "être", "fait", "faire",
+            "plus", "moins", "très", "trop", "aussi", "ainsi", "comme",
+            "the", "a", "an", "and", "or", "but", "to", "of", "in", "on", "for", "with",
+            "is", "are", "was", "were", "be", "been", "being",
+        }
+
+        q_tokens_raw = [t.lower() for t in re.findall(r"[0-9A-Za-zÀ-ÖØ-öø-ÿ]+", query)]
+        q_tokens = [t for t in q_tokens_raw if t not in stop and len(t) >= 3]
+        if not q_tokens:
+            return False
+
+        text_tokens_raw = [t.lower() for t in re.findall(r"[0-9A-Za-zÀ-ÖØ-öø-ÿ]+", text)]
+        text_tokens = {t for t in text_tokens_raw if t not in stop and len(t) >= 3}
+
+        coverage = sum(1 for t in set(q_tokens) if t in text_tokens) / max(1, len(set(q_tokens)))
+        if coverage < 0.80:
+            return False
+
+        # 5) Neutralité : refuser marqueurs marketing évidents
+        if "!" in text:
+            return False
+        if re.search(r"[🔥🚀💥🎉]", text):
+            return False
+        marketing = (
+            "incroyable", "exceptionnel", "meilleur", "ultime", "révolutionnaire",
+            "gratuit", "promo", "offre", "profitez", "garanti", "immanquable", "top", "100%"
+        )
+        lowered = text.lower()
+        if any(w in lowered for w in marketing):
+            return False
+
+        return True
+
+    except Exception:
+        # En cas d'incident : on ne bloque pas => reformulation
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Gemini (cloud)
+# ---------------------------------------------------------------------------
+
+def get_gemini_api_key(user_api_key: Optional[str] = None) -> str:
+    """
+    Récupère la clé Gemini :
+    - user_api_key (si fourni)
+    - env/secrets : GEMINI_API_KEY ou GOOGLE_API_KEY
+    """
+    if user_api_key and user_api_key.strip():
+        return user_api_key.strip()
+
+    key = get_env_var(["GEMINI_API_KEY", "GOOGLE_API_KEY"], default="")
+    key = (key or "").strip()
+    if not key:
+        raise RuntimeError(
+            "Aucune clé API Gemini trouvée. "
+            "Définis GEMINI_API_KEY (ou GOOGLE_API_KEY) dans l'environnement ou dans Streamlit Secrets."
+        )
+    return key
+
+
+def configure_gemini(api_key: Optional[str] = None) -> None:
+    genai = _lazy_import_genai()
+    key = get_gemini_api_key(user_api_key=api_key)
+    genai.configure(api_key=key)
+
+
+@lru_cache(maxsize=8)
+def get_gemini_model(model_name: str):
+    genai = _lazy_import_genai()
+    return genai.GenerativeModel(model_name)
+
+
+def test_gemini_connection(
+    model_name: Optional[str] = None,
+    user_api_key: Optional[str] = None,
+) -> str:
+    """
+    Test simple Gemini. Retourne un message texte (utilisé par app.py).
+    """
+    try:
+        configure_gemini(api_key=user_api_key)
+        model_id = (model_name or DEFAULT_GEMINI_MODEL).strip()
+        model = get_gemini_model(model_id)
+        resp = model.generate_content("Réponds simplement : 'OK Gemini GEO'.")
+        text = getattr(resp, "text", "") or ""
+        if "OK Gemini GEO" in text:
+            return "OK Gemini GEO"
+        return f"OK Gemini (réponse: {text[:80]})"
+    except Exception as exc:
+        return f"ERREUR Gemini: {exc}"
+
+
+def call_gemini_text(prompt: str, model_name: Optional[str] = None, temperature: float = 0.2) -> str:
+    configure_gemini()
+    model_id = (model_name or DEFAULT_GEMINI_MODEL).strip()
+    model = get_gemini_model(model_id)
+    resp = model.generate_content(prompt, generation_config={"temperature": float(temperature)})
+    return (getattr(resp, "text", "") or "").strip()
+
+
+# ---------------------------------------------------------------------------
+# Ollama (local)
+# ---------------------------------------------------------------------------
 
 def call_ollama_chat(
     prompt: str,
     model: Optional[str] = None,
     base_url: Optional[str] = None,
-    temperature: float = 0.3,
+    temperature: float = 0.2,
     timeout: int = 120,
 ) -> str:
-    """
-    Appelle l'API locale d'Ollama (/api/chat) avec un prompt texte unique.
-
-    - prompt : texte complet (instructions + contenu à reformuler)
-    - model : nom du modèle Ollama (par défaut OLLAMA_MODEL_NAME)
-    - base_url : URL de base (par défaut OLLAMA_BASE_URL)
-    - temperature : niveau de créativité
-    """
-    model_name = model or OLLAMA_MODEL_NAME
     base = (base_url or OLLAMA_BASE_URL).rstrip("/")
     url = f"{base}/api/chat"
 
     payload = {
-        "model": model_name,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
+        "model": model or OLLAMA_MODEL_NAME,
+        "messages": [{"role": "user", "content": prompt}],
         "stream": False,
-        "options": {
-            "temperature": float(temperature),
-        },
+        "options": {"temperature": float(temperature)},
     }
 
     try:
@@ -104,29 +234,17 @@ def call_ollama_chat(
         raise RuntimeError(
             "Impossible de se connecter à Ollama.\n"
             "- Vérifie que l'application Ollama est lancée.\n"
-            "- Vérifie que l'API répond (curl http://localhost:11434/api/tags).\n"
+            f"- Vérifie que l'API répond sur {base}\n"
         ) from exc
     except requests.RequestException as exc:
         raise RuntimeError(f"Erreur lors de l'appel à Ollama : {exc}") from exc
 
     if response.status_code != 200:
-        raise RuntimeError(
-            f"Ollama a renvoyé un statut HTTP {response.status_code} : {response.text}"
-        )
+        raise RuntimeError(f"Ollama a renvoyé {response.status_code} : {response.text}")
 
-    try:
-        data = response.json()
-        message = data.get("message", {})
-        content = message.get("content", "")
-    except Exception as exc:
-        raise RuntimeError(
-            f"Réponse inattendue d'Ollama (JSON invalide) : {exc}"
-        ) from exc
-
-    if not content:
-        raise RuntimeError("Réponse vide d'Ollama (champ 'message.content' manquant).")
-
-    return content.strip()
+    data = response.json()
+    message = data.get("message", {}) or {}
+    return (message.get("content", "") or "").strip()
 
 
 def test_ollama_connection(
@@ -134,9 +252,7 @@ def test_ollama_connection(
     base_url: Optional[str] = None,
 ) -> str:
     """
-    Envoie une requête de test à Ollama pour vérifier que :
-    - l'API est accessible
-    - le modèle demandé peut répondre.
+    Test simple Ollama. Retourne un message texte (utilisé par app.py).
     """
     try:
         _ = call_ollama_chat(
@@ -146,198 +262,48 @@ def test_ollama_connection(
             temperature=0.0,
             timeout=30,
         )
-        return "Connexion à Ollama OK ✅"
+        return "OK Ollama GEO"
     except Exception as exc:
-        return f"Connexion à Ollama KO ❌ : {exc}"
+        return f"ERREUR Ollama: {exc}"
 
 
-# =========================
-# LOGIQUE GEO COMMUNE
-# =========================
+# ---------------------------------------------------------------------------
+# GEO prompt + rewrite
+# ---------------------------------------------------------------------------
 
-
-GEO_SYSTEM_INSTRUCTIONS = """
-Tu es un assistant spécialisé en reformulation de contenu pour le GEO (Generative Engine Optimization) en français.
-
-Rôle :
-- Réécrire un texte fourni en français en l'optimisant pour les moteurs de recherche (web et IA) tout en restant totalement fidèle au contenu d'origine.
-- Servir aussi de correcteur : tu dois corriger toutes les fautes d'orthographe, de grammaire, de typographie et de ponctuation.
-
-Règles générales :
-- Langue : français uniquement, sans anglicismes inutiles.
-- Orthographe et grammaire : impeccables, aucune faute n'est tolérée.
-- Sens et faits : tu dois respecter strictement la chronologie et les faits du texte original.
-  Tu n'ajoutes AUCUNE information factuelle nouvelle.
-  Même si tu as des connaissances extérieures, tu ne dois pas les utiliser pour enrichir le texte.
-- Lorsque la durée ou l’ancienneté est indiquée explicitement (par exemple « depuis plus de deux siècles »), tu ne dois pas la reformuler avec des termes qui changent l’ordre de grandeur. Par exemple, tu ne dois pas écrire « tradition millénaire », « depuis des millénaires » ou « depuis des siècles et des siècles » si ces expressions ne figurent pas dans le texte original.
-- Tu ne dois pas extrapoler ou commenter la situation d'autres acteurs (familles, maisons, concurrents) au-delà de ce qui est explicitement écrit. Par exemple, tu ne dois pas écrire que "certaines ont prospéré" ou que "d'autres ont disparu" si ces éléments ne figurent pas dans le texte original.
-- Tu ne modifies pas le rôle ni l'importance des acteurs (personnes, maisons, marques) :
-  tu ne présentes pas le sujet comme ayant “façonné”, “révolutionné” ou “transformé” un secteur si ce n'est pas explicitement mentionné.
-- Tu ne supprimes aucune information importante : aucune phrase ou idée significative du texte original ne doit disparaître.
-- Tu peux uniquement ajouter des liaisons neutres pour la fluidité (“au fil des décennies”, “peu à peu”, “aujourd'hui”, etc.), sans créer de faits nouveaux.
-- Longueur : texte de longueur comparable au texte d'origine (environ ± 20 %).
-- Ton : équilibre entre institutionnel et narratif, avec un lyrisme mesuré.
-  Tu t'inspires en priorité du ton du texte original.
-- Cohérence des temps verbaux : si le texte raconte une histoire passée, tu utilises des temps du passé (passé composé, imparfait, etc.), pas le futur, sauf si le futur est déjà présent dans le texte original.
-
-Structure :
-- Le titre de la section (par exemple « Du siècle des Lumières à nos jours ») est fourni comme contexte. TU NE DOIS PAS LE RÉÉCRIRE.
-- Tu ne dois pas ajouter ce titre au début de ta réponse, ni le dupliquer, ni le transformer.
-- Tu produis un texte continu composé de paragraphes.
-- Tu ne crées PAS de sections ou intitulés supplémentaires comme « Introduction », « Conclusion », etc., sauf si ces mots sont déjà présents dans le texte original.
-- Tu ne crées PAS de listes à puces si le texte d'origine n'en contient pas.
-- Si des listes existent, tu peux les lisser mais SANS ajouter de nouveaux items.
-
-Mise en forme :
-- Sortie en texte brut uniquement (pas de Markdown, pas de HTML, pas de gras/italique).
-- Pas de commentaires méta du type « Voici le texte réécrit », « Dans cet article », etc.
-"""
-
-
-def build_geo_prompt(
-    original_text: str,
-    target_query: str,
-    rewrite_mode: str = "ameliorer",
-) -> str:
-    """
-    Construit un prompt complet pour le backend LLM (Gemini ou Ollama),
-    en injectant :
-    - les instructions GEO,
-    - un exemple de style,
-    - le texte source à reformuler,
-    - le mode de réécriture (minimal, améliorer, créatif mesuré).
-    """
+def build_geo_prompt(original_text: str, target_query: str, rewrite_mode: str = "ameliorer") -> str:
     original_text = (original_text or "").strip()
     target_query = (target_query or "").strip()
+    rewrite_mode = (rewrite_mode or "ameliorer").strip().lower()
 
-    if not original_text:
-        raise ValueError("Le texte original est vide.")
-    if not target_query:
-        raise ValueError("La requête cible est vide.")
+    mode_rules = {
+        "minimal": "Change le moins possible. Corrige surtout la clarté, la structure, et la couverture sémantique.",
+        "ameliorer": "Améliore clairement la structure et la couverture sémantique, tout en restant fidèle au fond.",
+        "creatif": "Améliore avec un peu plus de fluidité, mais reste factuel et non lyrique.",
+    }
+    mode_instruction = mode_rules.get(rewrite_mode, mode_rules["ameliorer"])
 
-    # Instructions plus directives et distinctes
-    rewrite_mode = (rewrite_mode or "ameliorer").lower()
-    if rewrite_mode == "minimal":
-        mode_instructions = """
-MODE : RÉÉCRITURE MINIMALE
-Objectif : Corriger, nettoyer et lisser très légèrement, sans transformer le texte.
+    instructions = f"""
+Tu es un éditeur GEO (Generative Engine Optimization).
+Objectif : produire un texte exploitable par des moteurs IA (structure claire, ton neutre, faits).
+Contraintes :
+- NE PAS inventer de faits, chiffres, dates, citations.
+- NE PAS ajouter de détails non présents dans la source.
+- Conserver toutes les idées importantes.
+- Style : factuel, neutre, lisible, sections courtes, listes si utile.
+- Optimiser la couverture sémantique autour de la requête cible : "{target_query}".
 
-Règles spécifiques :
-1. Corrige uniquement l'orthographe, la grammaire, la typographie et la ponctuation.
-2. Tu peux effectuer de très légers ajustements pour la clarté (ordre des mots, répétitions), mais tu dois :
-   - conserver le même nombre d'idées,
-   - conserver toutes les phrases importantes,
-   - ne pas changer le ton de manière notable.
-3. Tu ne fusionnes pas et tu ne supprimes pas de phrases complètes.
-4. Tu ne modifies pas la structure du texte au-delà de micro-ajustements.
-5. INTERDIT :
-   - d'ajouter des informations nouvelles,
-   - de supprimer des informations ou des phrases significatives,
-   - de réorganiser profondément le texte.
-"""
-    elif rewrite_mode == "creatif":
-        mode_instructions = """
-MODE : PROPOSITION CRÉATIVE
-Objectif : Proposer une version plus engageante du texte, tout en restant 100 % factuelle.
+Niveau demandé : {rewrite_mode}
+Règle de mode : {mode_instruction}
+""".strip()
 
-Règles spécifiques :
-1. Utilise un vocabulaire plus riche et des tournures plus travaillées, mais reste dans un ton institutionnel et sobre (pas de roman).
-2. Tu peux varier le rythme des phrases (alternance de phrases courtes et longues) pour rendre la lecture plus agréable.
-3. Tu conserves toutes les informations importantes du texte original : aucune idée ni aucun fait ne doit disparaître.
-4. Tu ne modifies pas la portée des affirmations : tu ne présentes pas la Maison ou les personnes comme ayant un rôle plus grand que celui qui est décrit (pas de « a façonné les grandes familles », etc., si ce n'est pas écrit).
-5. Tu ne dois pas non plus commenter l'évolution ou la réussite d'autres maisons ou acteurs (survie, prospérité, déclin, disparition, etc.) si cela n'est pas explicitement mentionné dans le texte original.
-6. INTERDIT :
-   - d'inventer des faits, des événements, des acquisitions, des extensions de domaine, des personnes ou des dates qui ne sont pas dans le texte,
-   - d'ajouter des listes ou des sous-titres qui n'existent pas dans le texte original,
-   - d'utiliser un ton romanesque ou exagéré (« légende », « empire », « mission sacrée », etc.), sauf si ces termes sont déjà présents dans le texte original.
-7. Lorsque le texte mentionne une durée précise ou approximative (par exemple « depuis plus de deux siècles »), tu ne dois pas la amplifier en parlant de « tradition millénaire », « depuis des millénaires » ou d’une ancienneté plus grande. Tu restes strictement dans le même ordre de grandeur que le texte d’origine.
-8. Tu respectes toutes les règles globales définies dans GEO_SYSTEM_INSTRUCTIONS.
-"""
-    else:  # "ameliorer" par défaut
-        mode_instructions = """
-MODE : AMÉLIORER LA TOURNURE (STANDARD)
-Objectif : Rendre le texte plus fluide, professionnel et agréable à lire, sans modifier le sens.
+    return f"""{instructions}
 
-Règles spécifiques :
-1. Reformule les phrases lourdes ou maladroites pour améliorer la clarté.
-2. Tu peux ajouter des connecteurs logiques naturels (« ainsi », « au fil des ans », « par ailleurs ») pour fluidifier le texte.
-3. Tu peux regrouper ou découper des phrases, à condition de conserver toutes les informations du texte original.
-4. Tu respectes l'ordre logique des idées et la chronologie décrite dans le texte.
-5. Tu ne rajoutes pas de commentaires généraux sur la situation des autres maisons, familles ou acteurs (par exemple « certains ont prospéré », « d'autres ont disparu ») si ces éléments ne sont pas clairement indiqués dans le texte d'origine.
-6. Tu ne modifies pas le rôle ni l'importance des acteurs par rapport à ce qui est écrit.
-7. INTERDIT :
-   - d'ajouter de nouveaux faits ou détails qui ne sont pas présents dans le texte d'origine,
-   - de supprimer des phrases ou des idées importantes,
-   - de transformer le texte en discours trop lyrique ou romanesque.
-"""
-
-    # ... (code existant pour les exemples few-shot) ...
-
-    # Exemple concret (few-shot) pour ancrer le style attendu
-    exemple_original = (
-        "Au cœur de la Bourgogne, un jeune homme, se lance dans le vin. "
-        "Jean-Claude Boisset a 18 ans, la fougue et la passion de la jeunesse et tout l'avenir devant lui… "
-        "Nous sommes à deux pas de Gevrey-Chambertin où il a grandi. C'est l'été 1961. "
-        "A partir de 1970 les vins s'exportent en Europe. Jean-Claude Boisset s'installe à Vougeot, "
-        "son village de prédilection puis à Nuits-Saint-Georges. "
-        "Dès les années 1980 est initiée la croissance externe en Bourgogne ainsi que la diversification "
-        "de l'activité avec l'introduction des spiritueux en 1988 et des vins effervescents à la veille des années 1990. "
-        "Les années qui suivent marquent la volonté de s'implanter au cœur même des terroirs : le Beaujolais, le Languedoc, le Rhône. "
-        "Les années 2000, nouveau millénaire, nouveau continent : la Californie. "
-        "L'histoire continue avec l'acquisition du Domaine Maire & Fils, le plus grand domaine viticole du Jura, "
-        "les Maisons Meffre, Alex Gambal, Chais du Sud et le Grand Courtâge."
-    )
-
-    exemple_reecrit = (
-        "Notre héritage prend racine au cœur de la Bourgogne. En 1961, à deux pas de Gevrey-Chambertin où il a grandi, "
-        "Jean-Claude Boisset, alors âgé de 18 ans, se lance dans le vin, porté par la fougue et la passion de la jeunesse.\n\n"
-        "À partir de 1970, ses vins commencent à s'exporter en Europe. Jean-Claude Boisset s'installe d'abord à Vougeot, "
-        "son village de prédilection, puis à Nuits-Saint-Georges, ancrant son histoire au plus près des grands terroirs bourguignons.\n\n"
-        "Dans les années 1980, une dynamique de croissance externe s'engage en Bourgogne, accompagnée d'une diversification de l'activité "
-        "avec l'introduction des spiritueux en 1988, puis des vins effervescents à la veille des années 1990.\n\n"
-        "Les années qui suivent marquent la volonté de s'implanter au cœur d'autres vignobles français – Beaujolais, Languedoc, Rhône – "
-        "avant l'ouverture vers un nouveau continent dans les années 2000 avec la Californie. "
-        "L'histoire continue avec l'acquisition du Domaine Maire & Fils, le plus grand domaine viticole du Jura, "
-        "ainsi que des Maisons Meffre, Alex Gambal, Chais du Sud et Le Grand Courtâge."
-    )
-
-    prompt = f"""{GEO_SYSTEM_INSTRUCTIONS}
-
-Requête cible (titre de section ou intention principale) :
-"{target_query}"
-
-Exemple de réécriture attendue (pour contexte de style) :
-
-Texte original (exemple) :
----
-{exemple_original}
----
-
-Texte réécrit (exemple de version GEO optimisée) :
----
-{exemple_reecrit}
----
-
-Cet exemple illustre le niveau de réécriture attendu pour le mode « Améliorer la tournure ». Si le mode demandé est « Réécriture minimale » ou « Proposition créative », adapte ton degré de modification en suivant STRICTEMENT les règles du mode correspondant.
-
-Maintenant, applique la logique au texte ci-dessous.
-
-Texte original à reformuler :
----
+--- TEXTE SOURCE ---
 {original_text}
----
 
-
-{mode_instructions}
-
-Consigne finale (très importante) :
-- Tu ne dois pas réécrire le titre "{target_query}" : il sert uniquement de contexte.
-- Tu réécris UNIQUEMENT le texte ci-dessous.
-- Applique STRICTEMENT les consignes du mode choisi.
-- Pas de commentaires, pas de balises.
+--- TEXTE REFORMULÉ (sortie finale uniquement) ---
 """
-
-    return prompt
 
 
 def geo_rewrite_content(
@@ -348,114 +314,34 @@ def geo_rewrite_content(
     backend: str = "ollama",
     user_api_key: Optional[str] = None,
 ) -> str:
-    """
-    Point d'entrée principal pour la reformulation GEO.
-
-    Args:
-        original_text: Le texte source à reformuler.
-        target_query: Titre de section ou requête cible (contexte).
-        model_name: Nom du modèle (optionnel).
-        rewrite_mode: Mode de réécriture :
-            - "minimal": Correction et lissage léger.
-            - "ameliorer": Fluidité et ton professionnel (défaut).
-            - "creatif": Style plus riche mais 100% factuel.
-        backend: "ollama" ou "gemini".
-        user_api_key: Clé API optionnelle pour Gemini.
-    """
     if original_text and len(original_text) > 10000:
         raise ValueError(
             "Le texte est trop long pour une reformulation en une seule fois (max 10k caractères). "
-            "Merci de le raccourcir ou de le traiter en plusieurs parties."
+            "Découpe-le en sections."
         )
 
-    rewrite_mode = (rewrite_mode or "ameliorer").lower()
-    prompt = build_geo_prompt(original_text, target_query, rewrite_mode=rewrite_mode)
-    backend = (backend or "ollama").lower()
+    original_text = (original_text or "").strip()
+    target_query = (target_query or "").strip()
+    if not original_text:
+        raise ValueError("Texte original vide.")
+    if not target_query:
+        raise ValueError("Requête cible vide.")
 
-    # On garde une température interne, mais elle n'est plus exposée à l'utilisateur
-    if rewrite_mode == "minimal":
-        temperature = 0.0  # Très déterministe pour le minimal
-    elif rewrite_mode == "creatif":
-        temperature = 0.5  # Plus élevé pour permettre la variation
-    else:  # "ameliorer"
-        temperature = 0.3  # Standard
+    prompt = build_geo_prompt(original_text, target_query, rewrite_mode=rewrite_mode)
+    backend = (backend or "gemini").strip().lower()
 
     if backend == "ollama":
-        model = model_name or OLLAMA_MODEL_NAME
-        return call_ollama_chat(
-            prompt=prompt,
-            model=model,
-            temperature=temperature,
-        )
+        return call_ollama_chat(prompt)
 
-    if backend == "gemini":
-        configure_gemini(api_key=user_api_key)
-        model_id = model_name or DEFAULT_GEMINI_MODEL
-        model = get_gemini_model(model_id)
-        try:
-            response = model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=float(temperature),
-                ),
-            )
-        except Exception as exc:
-            raise RuntimeError(f"Erreur lors de l'appel à Gemini : {exc}") from exc
-
-        text = getattr(response, "text", None)
-
-        if not text:
-            # Fallback : tenter de reconstruire le texte à partir des candidats / parts
-            fallback_chunks = []
-
-            candidates = getattr(response, "candidates", None)
-            if candidates:
-                for cand in candidates:
-                    content = getattr(cand, "content", None)
-                    parts = getattr(content, "parts", None) if content else None
-                    if parts:
-                        for part in parts:
-                            part_text = getattr(part, "text", None)
-                            if part_text:
-                                fallback_chunks.append(part_text)
-
-            text = " ".join(fallback_chunks).strip() if fallback_chunks else ""
-
-        if not text:
-            raise RuntimeError("Réponse vide ou bloquée par Gemini (filtres de sécurité ?).")
-
-        return text.strip()
-
-    raise ValueError(f"Backend LLM inconnu : {backend}")
+    configure_gemini(api_key=user_api_key)
+    return call_gemini_text(prompt, model_name=model_name or DEFAULT_GEMINI_MODEL, temperature=0.2)
 
 
-def test_gemini_connection(
-    model_name: Optional[str] = None,
-    user_api_key: Optional[str] = None,
-) -> str:
-    """
-    Teste la connexion à Gemini :
-    - configuration avec la clé fournie ou .env
-    - génération d'une petite réponse
-    """
-    try:
-        configure_gemini(api_key=user_api_key)
-        model_id = model_name or DEFAULT_GEMINI_MODEL
-        model = get_gemini_model(model_id)
-        resp = model.generate_content("Réponds simplement : 'OK Gemini GEO'.")
-        text = getattr(resp, "text", "") or ""
-        if "OK Gemini GEO" in text:
-            return "Connexion à Gemini OK ✅"
-        return "Gemini répond, mais le message de test ne correspond pas exactement (OK Gemini GEO)."
-    except Exception as exc:
-        return f"Connexion à Gemini KO ❌ : {exc}"
+# ---------------------------------------------------------------------------
+# Monitoring (DuckDuckGo HTML)
+# ---------------------------------------------------------------------------
 
-
-# =========================
-# GEO MONITORING (DuckDuckGo)
-# =========================
-
-@dataclasses.dataclass
+@dataclass
 class MonitoringResult:
     query: str
     rank: int
@@ -468,13 +354,24 @@ class MonitoringResult:
 DDG_SEARCH_URL = "https://duckduckgo.com/html/"
 
 
-def _fetch_duckduckgo_results(query: str, max_results: int = 10) -> List[Dict[str, Any]]:
-    """
-    Scraping léger de DuckDuckGo (interface HTML).
-    Important : usage limité, respectueux, pour un monitoring simple / POC.
+def _clean_ddg_url(raw_href: str) -> str:
+    if not raw_href:
+        return ""
+    href = raw_href.strip()
+    if href.startswith("/l/") or "uddg=" in href:
+        try:
+            parsed = urllib.parse.urlparse(href)
+            qs = urllib.parse.parse_qs(parsed.query)
+            if "uddg" in qs and qs["uddg"]:
+                return urllib.parse.unquote(qs["uddg"][0])
+        except Exception:
+            return href
+    return href
 
-    Retourne une liste de dicts bruts avec titre, url, snippet.
-    """
+
+def _fetch_duckduckgo_results(query: str, max_results: int = 10) -> List[Dict[str, str]]:
+    BeautifulSoup = _lazy_import_bs4()
+
     params = {"q": query, "kl": "fr-fr"}
     headers = {
         "User-Agent": (
@@ -484,42 +381,26 @@ def _fetch_duckduckgo_results(query: str, max_results: int = 10) -> List[Dict[st
         )
     }
 
-    try:
-        response = requests.get(
-            DDG_SEARCH_URL, params=params, headers=headers, timeout=15
-        )
-    except requests.RequestException:
+    r = requests.get(DDG_SEARCH_URL, params=params, headers=headers, timeout=20)
+    if r.status_code >= 400:
         return []
 
-    if response.status_code != 200:
-        return []
+    soup = BeautifulSoup(r.text, "html.parser")
+    results: List[Dict[str, str]] = []
 
-    soup = BeautifulSoup(response.text, "html.parser")
-    results = []
-
-    # La structure HTML peut changer : on reste volontairement simple/robuste.
     for res in soup.select("div.result"):
         link = res.select_one("a.result__a")
-        snippet_el = res.select_one("a.result__snippet") or res.select_one(
-            "div.result__snippet"
-        )
-
+        snippet_el = res.select_one("a.result__snippet") or res.select_one("div.result__snippet")
         if not link:
             continue
 
         title = link.get_text(" ", strip=True)
-        url = link.get("href", "")
+        raw_href = link.get("href", "")
+        final_url = _clean_ddg_url(raw_href)
         snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
 
-        results.append(
-            {
-                "title": title,
-                "url": url,
-                "snippet": snippet,
-            }
-        )
-
-        if len(results) >= max_results:
+        results.append({"title": title, "url": final_url, "snippet": snippet})
+        if len(results) >= int(max_results):
             break
 
     return results
@@ -529,16 +410,13 @@ def monitor_keywords(
     queries: List[str],
     brand_or_domain: str,
     max_results: int = 10,
-) -> pd.DataFrame:
+):
     """
-    Monitoring simple :
-    - queries : liste de requêtes à tester
-    - brand_or_domain : nom de marque ou domaine (ex : "boisset.com")
-    - max_results : nombre max de résultats analysés par requête
+    Retourne un DataFrame (utilisé par app.py).
+    Lazy import pandas pour éviter de crasher l'app au démarrage.
+    """
+    pd = _lazy_import_pandas()
 
-    Retourne un DataFrame avec colonnes :
-    - query, rank, title, url, snippet, brand_present
-    """
     brand = (brand_or_domain or "").strip().lower()
     rows: List[MonitoringResult] = []
 
@@ -548,14 +426,12 @@ def monitor_keywords(
             continue
 
         raw_results = _fetch_duckduckgo_results(q, max_results=max_results)
-
-        for idx, r in enumerate(raw_results, start=1):
-            title = r.get("title", "")
-            url = r.get("url", "")
-            snippet = r.get("snippet", "")
-
-            text_concat = " ".join([title, url, snippet]).lower()
-            brand_present = bool(brand and brand in text_concat)
+        for idx, item in enumerate(raw_results, start=1):
+            title = item.get("title", "")
+            url = item.get("url", "")
+            snippet = item.get("snippet", "")
+            concat = f"{title} {url} {snippet}".lower()
+            brand_present = brand in concat
 
             rows.append(
                 MonitoringResult(
@@ -568,6 +444,4 @@ def monitor_keywords(
                 )
             )
 
-    df = pd.DataFrame([dataclasses.asdict(r) for r in rows])
-    return df
-
+    return pd.DataFrame([dataclasses.asdict(r) for r in rows])
