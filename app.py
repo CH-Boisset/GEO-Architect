@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional
 
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_autorefresh import st_autorefresh
 
 st.set_page_config(page_title="GEO Architect", page_icon="🧠", layout="wide")
 
@@ -109,34 +110,84 @@ def _make_sig(original_text: str, target_query: str, rewrite_mode: str, model_na
 
 def copy_to_clipboard_button(text: str, label: str = "📋 Copier le texte", key: str = "copy_btn") -> None:
     """
-    Bouton de copie vers le presse-papiers utilisateur via l'API navigateur.
-    Fonctionne en HTTPS (Streamlit Cloud) et sur action utilisateur (clic).
+    Bouton de copie vers le presse-papiers via un vrai clic DOM (composant HTML).
+    Plus fiable que navigator.clipboard lancé “après” un clic Streamlit.
+    Inclut fallback execCommand('copy').
     """
     t = (text or "")
-    disabled = not t.strip()
+    disabled = "true" if not t.strip() else "false"
 
-    if st.button(label, use_container_width=True, disabled=disabled, key=key):
-        # json.dumps pour échapper correctement le texte (guillemets, retours ligne, etc.)
-        payload = json.dumps(t)
-        components.html(
-            f"""
+    # json.dumps pour échapper correctement les retours ligne, guillemets, etc.
+    payload = json.dumps(t)
+
+    components.html(
+        f"""
+<div style="margin-top:8px;">
+  <button id="{key}_btn" style="
+      width: 100%;
+      padding: 0.6rem 0.75rem;
+      border-radius: 0.5rem;
+      border: 1px solid rgba(49, 51, 63, 0.2);
+      background: white;
+      cursor: pointer;
+      font-weight: 600;
+    " {{"disabled" if disabled=="true" else ""}}>
+    {label}
+  </button>
+</div>
+
 <script>
-(async () => {{
-  try {{
-    await navigator.clipboard.writeText({payload});
-  }} catch (e) {{
-    console.log("Clipboard error:", e);
+(function() {{
+  const btn = document.getElementById("{key}_btn");
+  if (!btn) return;
+
+  const disabled = {disabled};
+  if (disabled) {{
+    btn.style.opacity = "0.5";
+    btn.style.cursor = "not-allowed";
+    btn.disabled = true;
+    return;
   }}
+
+  const textToCopy = {payload};
+
+  async function doCopy() {{
+    try {{
+      if (navigator.clipboard && window.isSecureContext) {{
+        await navigator.clipboard.writeText(textToCopy);
+      }} else {{
+        // Fallback (moins moderne) : textarea + execCommand
+        const ta = document.createElement("textarea");
+        ta.value = textToCopy;
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        ta.style.top = "-9999px";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }}
+      const old = btn.innerText;
+      btn.innerText = "Copié ✅";
+      setTimeout(() => {{ btn.innerText = old; }}, 1500);
+    }} catch (e) {{
+      console.log("Clipboard error:", e);
+      const old = btn.innerText;
+      btn.innerText = "Copie impossible ❌";
+      setTimeout(() => {{ btn.innerText = old; }}, 2000);
+    }}
+  }}
+
+  btn.addEventListener("click", (e) => {{
+    e.preventDefault();
+    doCopy();
+  }});
 }})();
 </script>
-            """,
-            height=0,
-        )
-        # Feedback UI côté Streamlit (indépendant du JS)
-        try:
-            st.toast("Texte copié dans le presse-papiers ✅")
-        except Exception:
-            st.success("Texte copié dans le presse-papiers ✅")
+        """,
+        height=90,
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -263,8 +314,20 @@ def render_geo_reformulation_tab() -> None:
 
     now = time.time()
     cooldown_remaining = max(0, int(st.session_state["cooldown_until_ts"] - now))
+
+    cooldown_placeholder = st.empty()
     if cooldown_remaining > 0:
-        st.warning(f"Quota / limitation détectée. Réessayez dans ~{cooldown_remaining} secondes.", icon="⏳")
+        # Auto-rerun chaque seconde tant que le cooldown est actif
+        st_autorefresh(interval=1000, key="cooldown_autorefresh")
+        cooldown_placeholder.warning(
+            f"Quota / limitation détectée. Réessayez dans {cooldown_remaining} seconde(s).",
+            icon="⏳",
+        )
+    else:
+        # Nettoie si on est passé à zéro
+        if st.session_state.get("cooldown_until_ts", 0) != 0:
+            st.session_state["cooldown_until_ts"] = 0
+        cooldown_placeholder.empty()
 
     gate = st.session_state.get("optimized_gate")
     gate_matches = False
