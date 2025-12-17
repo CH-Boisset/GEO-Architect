@@ -238,6 +238,59 @@ def render_geo_reformulation_tab() -> None:
         current_sig = _make_sig(original_text, target_query, rewrite_mode, DEFAULT_GEMINI_MODEL, backend)
         gate_matches = bool(gate.get("sig") and gate.get("sig") == current_sig)
 
+    # ---------------------------------------------------------------------
+    # POP-UP "Texte déjà optimisé" (UX)
+    # ---------------------------------------------------------------------
+    if gate_matches:
+        @st.dialog("🧠 Texte déjà optimisé")
+        def _optimized_modal():
+            st.markdown("### Texte déjà optimisé")
+            st.write(
+                "Le texte que vous venez de coller est déjà optimisé pour le référencement dans les IA."
+            )
+            st.write("Voulez-vous quand même obtenir une reformulation ?")
+
+            st.info(
+                "Si vous choisissez de reformuler, vous pourrez sélectionner l’un des 3 niveaux : "
+                "réécriture minimale, amélioration de la tournure, ou proposition créative.",
+                icon="ℹ️",
+            )
+
+            c1, c2, c3 = st.columns(3)
+
+            with c1:
+                if st.button("Ne pas reformuler (recommandé)", type="primary", use_container_width=True, key="modal_skip_rewrite"):
+                    st.session_state["last_result"] = {
+                        "text": original_text,
+                        "already_optimized": True,
+                        "similarity": 1.0,
+                        "repaired": False,
+                        "violations": [],
+                        "cooldown_seconds": None,
+                        "error": None,
+                    }
+                    st.session_state["optimized_gate"] = None
+                    st.session_state["force_after_optimized"] = False
+                    st.rerun()
+
+            with c2:
+                if st.button("Reformuler quand même", use_container_width=True, key="modal_force_rewrite"):
+                    # Active le mode "post-alerte" : libellés détaillés côté UI
+                    st.session_state["force_after_optimized"] = True
+                    # SAFE: ne pas modifier un widget après instanciation -> on utilise pending_set_mode_label
+                    st.session_state["pending_set_mode_label"] = "Réécriture minimale (Conserver au maximum le texte d'origine)"
+                    st.session_state["optimized_gate"] = None
+                    st.rerun()
+
+            with c3:
+                if st.button("Continuer à éditer", use_container_width=True, key="modal_continue_edit"):
+                    # On ferme la pop-up en retirant le gate
+                    st.session_state["optimized_gate"] = None
+                    st.session_state["force_after_optimized"] = False
+                    st.rerun()
+
+        _optimized_modal()
+
     with col_result:
         with st.container(border=True):
             st.markdown("#### Texte GEO optimisé")
@@ -246,36 +299,8 @@ def render_geo_reformulation_tab() -> None:
             if isinstance(last, dict):
                 if last.get("already_optimized"):
                     st.caption("🏷️ **Texte déjà optimisé**")
-                if last.get("repaired"):
+            if isinstance(last, dict) and last.get("repaired"):
                     st.caption("🛠️ **Sortie réparée**")
-
-            if gate_matches:
-                st.warning(
-                    "Le texte original semble déjà optimisé pour le GEO, voulez-vous une reformulation quand même ?",
-                    icon="🧠",
-                )
-                b1, b2 = st.columns(2)
-                with b1:
-                    if st.button("Ne pas reformuler (recommandé)", use_container_width=True, key="btn_skip_rewrite"):
-                        st.session_state["last_result"] = {
-                            "text": original_text,
-                            "already_optimized": True,
-                            "similarity": 1.0,
-                            "repaired": False,
-                            "violations": [],
-                            "cooldown_seconds": None,
-                            "error": None,
-                        }
-                        st.session_state["optimized_gate"] = None
-                        st.session_state["force_after_optimized"] = False
-                        st.rerun()
-                with b2:
-                    if st.button("Reformuler quand même", use_container_width=True, key="btn_force_rewrite"):
-                        # SAFE: ne pas modifier la clé du selectbox après instanciation
-                        st.session_state["force_after_optimized"] = True
-                        st.session_state["pending_set_mode_label"] = "Réécriture minimale (Conserver au maximum le texte d'origine)"
-                        st.session_state["optimized_gate"] = None
-                        st.rerun()
 
             result_text = ""
             if isinstance(last, dict):
