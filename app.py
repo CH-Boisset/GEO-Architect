@@ -83,6 +83,9 @@ def _init_state() -> None:
         "optimized_gate": None,           # dict si pré-check déclenche
         "force_after_optimized": False,   # si l’utilisateur force
         "pending_set_mode_label": None,   # SAFE: set widget state before widget creation
+        "show_post_optimized_modal": False,  # pop-up post-résultat
+        "post_optimized_modal_sig": "",      # sig déjà affichée (anti boucle)
+        "last_result_sig": "",               # sig du dernier résultat affiché
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -375,6 +378,13 @@ def render_geo_reformulation_tab() -> None:
                     }
                     st.session_state["optimized_gate"] = None
                     st.session_state["force_after_optimized"] = False
+
+                    # Déclenche aussi la pop-up post-résultat (plus visible) après affichage du texte
+                    st.session_state["last_result_sig"] = current_sig
+                    if st.session_state.get("post_optimized_modal_sig") != current_sig:
+                        st.session_state["show_post_optimized_modal"] = True
+                        st.session_state["post_optimized_modal_sig"] = current_sig
+
                     st.rerun()
 
             with c2:
@@ -395,15 +405,79 @@ def render_geo_reformulation_tab() -> None:
 
         _optimized_modal()
 
+    # ---------------------------------------------------------------------
+    # POP-UP post-résultat : "Texte déjà optimisé" (quand already_optimized=True)
+    # ---------------------------------------------------------------------
+    last_res = st.session_state.get("last_result") or {}
+    if (
+        st.session_state.get("show_post_optimized_modal")
+        and isinstance(last_res, dict)
+        and last_res.get("already_optimized")
+        and not gate_matches  # évite les modals empilées
+    ):
+
+        @st.dialog("🧠 Texte déjà optimisé")
+        def _post_optimized_modal():
+            st.markdown("### Texte déjà optimisé")
+            st.write("Le texte est déjà optimisé pour le référencement dans les IA.")
+            st.write("Souhaitez-vous simplement le récupérer, ou relancer une reformulation ?")
+
+            c1, c2 = st.columns(2)
+
+            with c1:
+                if st.button("Voir mon texte", type="primary", use_container_width=True, key="postopt_view_text"):
+                    st.session_state["show_post_optimized_modal"] = False
+                    st.rerun()
+
+            with c2:
+                if st.button("Modifier le niveau de réécriture", use_container_width=True, key="postopt_change_level"):
+                    # Ferme la pop-up
+                    st.session_state["show_post_optimized_modal"] = False
+
+                    # Active libellés détaillés et sélectionne "Améliorer..." via pending_set_mode_label
+                    st.session_state["force_after_optimized"] = True
+                    st.session_state["pending_set_mode_label"] = "Améliorer la tournure (Modification du texte d'origine)"
+
+                    # Relance auto en mode "ameliorer"
+                    desired_mode = "ameliorer"
+                    sig2 = _make_sig(original_text, target_query, desired_mode, DEFAULT_GEMINI_MODEL, backend)
+
+                    # Si cooldown actif, on laisse l’utilisateur attendre le minuteur (pas de crash)
+                    now2 = time.time()
+                    cooldown_remaining2 = max(0, int(st.session_state.get("cooldown_until_ts", 0) - now2))
+                    if cooldown_remaining2 > 0:
+                        st.warning(f"Quota / limitation détectée. Réessayez dans {cooldown_remaining2} seconde(s).", icon="⏳")
+                        return
+
+                    # Cache : si déjà présent, on applique sans appel IA
+                    cache = st.session_state.get("rewrite_cache", {})
+                    if isinstance(cache, dict) and sig2 in cache:
+                        st.session_state["last_result"] = cache[sig2]
+                        st.session_state["last_result_sig"] = sig2
+                        st.rerun()
+
+                    # Schedule génération via pipeline existant
+                    st.session_state["pending_action"] = "generate"
+                    st.session_state["pending_payload"] = {
+                        "sig": sig2,
+                        "original_text": original_text,
+                        "target_query": target_query,
+                        "rewrite_mode": desired_mode,
+                        "backend": backend,
+                        "model_name": DEFAULT_GEMINI_MODEL,
+                    }
+                    st.session_state["rewrite_inflight"] = True
+                    st.rerun()
+
+        _post_optimized_modal()
+
     with col_result:
         with st.container(border=True):
             st.markdown("#### Texte GEO optimisé")
 
             last = st.session_state.get("last_result") or {}
             if isinstance(last, dict):
-                if last.get("already_optimized"):
-                    st.caption("🏷️ **Texte déjà optimisé**")
-            if isinstance(last, dict) and last.get("repaired"):
+                if last.get("repaired"):
                     st.caption("🛠️ **Sortie réparée**")
 
             result_text = ""
@@ -475,6 +549,15 @@ def render_geo_reformulation_tab() -> None:
 
                 st.session_state["last_result"] = res
                 st.session_state["rewrite_cache"][payload["sig"]] = res
+
+                # Mémorise la signature du dernier résultat
+                st.session_state["last_result_sig"] = payload["sig"]
+
+                # Pop-up post-résultat: si already_optimized, on l’affiche une seule fois par sig
+                if res.get("already_optimized"):
+                    if st.session_state.get("post_optimized_modal_sig") != payload["sig"]:
+                        st.session_state["show_post_optimized_modal"] = True
+                        st.session_state["post_optimized_modal_sig"] = payload["sig"]
 
             except Exception as exc:
                 st.session_state["last_result"] = {
