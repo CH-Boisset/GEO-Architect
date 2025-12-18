@@ -654,12 +654,33 @@ def main() -> None:
     st.markdown(
         """
 <style>
-/* Réduit le padding haut du container principal */
-[data-testid="stAppViewContainer"] > .main { padding-top: 0.5rem; }
-/* Réduit le padding haut du block principal */
-[data-testid="stAppViewContainer"] { padding-top: 0.0rem; }
-/* Optionnel: réduire un peu l’espace sous le header */
-header { height: 3.0rem; }
+/* 1) Header Streamlit: invisible + pas de hauteur (pour remonter le contenu) */
+header[data-testid="stHeader"]{
+  opacity: 0 !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: 0 !important;
+  pointer-events: none !important;
+}
+
+/* 2) Container global: pas de padding top */
+[data-testid="stAppViewContainer"]{
+  padding-top: 0 !important;
+}
+
+/* 3) Main block container: padding top 0 et padding left/right 40px */
+[data-testid="stMainBlockContainer"]{
+  padding-top: 0 !important;
+  padding-left: 40px !important;
+  padding-right: 40px !important;
+}
+
+/* Optionnel: éviter une marge résiduelle sous le header si jamais */
+[data-testid="stAppViewContainer"] > .main{
+  padding-top: 0 !important;
+}
 </style>
         """,
         unsafe_allow_html=True,
