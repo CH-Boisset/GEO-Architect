@@ -111,19 +111,18 @@ def _make_sig(original_text: str, target_query: str, rewrite_mode: str, model_na
 def copy_to_clipboard_button(text: str, label: str = "📋 Copier le texte", key: str = "copy_btn") -> None:
     """
     Bouton de copie vers le presse-papiers via un vrai clic DOM (composant HTML).
-    Plus fiable que navigator.clipboard lancé “après” un clic Streamlit.
-    Inclut fallback execCommand('copy').
+    - Active clipboard API si possible (HTTPS / user gesture)
+    - Fallback execCommand('copy')
     """
     t = (text or "")
-    disabled = "true" if not t.strip() else "false"
+    is_disabled = not t.strip()
+    disabled_attr = "disabled" if is_disabled else ""
+    disabled_js = "true" if is_disabled else "false"
 
-    # json.dumps pour échapper correctement les retours ligne, guillemets, etc.
     payload = json.dumps(t)
 
-    components.html(
-        f"""
-<div style="margin-top:8px;">
-  <button id="{key}_btn" style="
+    # Style simple + état désactivé explicite (sans syntaxe {{...}} invalide)
+    btn_style = """
       width: 100%;
       padding: 0.6rem 0.75rem;
       border-radius: 0.5rem;
@@ -131,7 +130,15 @@ def copy_to_clipboard_button(text: str, label: str = "📋 Copier le texte", key
       background: white;
       cursor: pointer;
       font-weight: 600;
-    " {{"disabled" if disabled=="true" else ""}}>
+    """.strip()
+
+    if is_disabled:
+        btn_style += " opacity: 0.5; cursor: not-allowed;"
+
+    components.html(
+        f"""
+<div style="margin-top:8px;">
+  <button id="{key}_btn" {disabled_attr} style="{btn_style}">
     {label}
   </button>
 </div>
@@ -141,10 +148,8 @@ def copy_to_clipboard_button(text: str, label: str = "📋 Copier le texte", key
   const btn = document.getElementById("{key}_btn");
   if (!btn) return;
 
-  const disabled = {disabled};
+  const disabled = {disabled_js};
   if (disabled) {{
-    btn.style.opacity = "0.5";
-    btn.style.cursor = "not-allowed";
     btn.disabled = true;
     return;
   }}
@@ -156,7 +161,6 @@ def copy_to_clipboard_button(text: str, label: str = "📋 Copier le texte", key
       if (navigator.clipboard && window.isSecureContext) {{
         await navigator.clipboard.writeText(textToCopy);
       }} else {{
-        // Fallback (moins moderne) : textarea + execCommand
         const ta = document.createElement("textarea");
         ta.value = textToCopy;
         ta.style.position = "fixed";
