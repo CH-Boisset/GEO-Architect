@@ -236,7 +236,7 @@ def render_geo_reformulation_tab() -> None:
     st.info(
         "Cette version de GEO Architect utilise l'API Gemini en mode cloud. "
         "Ne collez pas de données sensibles ou strictement confidentielles.",
-        icon="ℹ️",
+        icon="⚠️",
     )
 
     if IS_PROD:
@@ -418,8 +418,8 @@ def render_geo_reformulation_tab() -> None:
 
         @st.dialog("🧠 Texte déjà optimisé")
         def _post_optimized_modal():
-            st.markdown("### Texte déjà optimisé")
-            st.write("Le texte est déjà optimisé pour le référencement dans les IA.")
+            st.markdown("### Le texte déjà optimisé")
+            st.write("pour le référencement dans les IA.")
             st.write("Souhaitez-vous simplement le récupérer, ou relancer une reformulation ?")
 
             c1, c2 = st.columns(2)
@@ -430,7 +430,7 @@ def render_geo_reformulation_tab() -> None:
                     st.rerun()
 
             with c2:
-                if st.button("Modifier le niveau de réécriture", use_container_width=True, key="postopt_change_level"):
+                if st.button("Relancer une reformulation", use_container_width=True, key="postopt_change_level"):
                     # Ferme la pop-up
                     st.session_state["show_post_optimized_modal"] = False
 
@@ -650,8 +650,32 @@ def main() -> None:
     if not _is_admin_session():
         _apply_user_css_hide_toolbar()
 
-    st.title("GEO Architect")
-    st.caption("MVP · Reformulation GEO + Monitoring simple")
+    # --- UI: réduire le bandeau vide en haut (padding container) ---
+    st.markdown(
+        """
+<style>
+/* Réduit le padding haut du container principal */
+[data-testid="stAppViewContainer"] > .main { padding-top: 0.5rem; }
+/* Réduit le padding haut du block principal */
+[data-testid="stAppViewContainer"] { padding-top: 0.0rem; }
+/* Optionnel: réduire un peu l’espace sous le header */
+header { height: 3.0rem; }
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        """
+<div style="margin-top:0.2rem; margin-bottom:0.25rem;">
+  <h1 style="margin:0; padding:0; line-height:1.05;">GEO Architect</h1>
+</div>
+<div style="margin-top:0; margin-bottom:0.75rem; color: rgba(49,51,63,0.7); font-size:0.95rem;">
+  MVP · Reformulation GEO + Monitoring simple
+</div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     render_backend_diagnostics()
 
