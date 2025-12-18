@@ -28,6 +28,13 @@ from geo_utils import (
 )
 
 # -----------------------------------------------------------------------------
+# UI sizing (évite le scroll initial)
+# -----------------------------------------------------------------------------
+UI_ORIGINAL_TEXT_HEIGHT = 260
+UI_RESULT_TEXT_HEIGHT = 360
+UI_MONITOR_QUERIES_HEIGHT = 180
+
+# -----------------------------------------------------------------------------
 # Admin UI (masquer toolbar/menu Streamlit pour users, garder pour admin)
 # -----------------------------------------------------------------------------
 
@@ -267,7 +274,7 @@ def render_geo_reformulation_tab() -> None:
 
             original_text = st.text_area(
                 "Texte original",
-                height=320,
+                height=UI_ORIGINAL_TEXT_HEIGHT,
                 placeholder="Collez ici le texte à reformuler (texte brut).",
                 key="geo_original_text",
             )
@@ -475,6 +482,88 @@ def render_geo_reformulation_tab() -> None:
         with st.container(border=True):
             st.markdown("#### Texte GEO optimisé")
 
+            disable_generate = st.session_state["rewrite_inflight"] or cooldown_remaining > 0 or gate_matches
+            btn_label = "🧠 Générer" if not st.session_state["force_after_optimized"] else "🧠 Lancer la reformulation"
+
+            if st.button(btn_label, type="primary", disabled=disable_generate, key="btn_generate"):
+                sig = _make_sig(original_text, target_query, rewrite_mode, DEFAULT_GEMINI_MODEL, backend)
+
+                if (time.time() - float(st.session_state["last_request_ts"])) < 2.0 and sig == st.session_state["last_request_sig"]:
+                    st.info("Requête identique déjà en cours / trop rapprochée. Patientez une seconde.", icon="🛑")
+                else:
+                    st.session_state["last_request_sig"] = sig
+                    st.session_state["last_request_ts"] = time.time()
+
+                    if (not st.session_state["force_after_optimized"]) and target_query.strip() and original_text.strip():
+                        if geo_is_text_already_optimized(original_text=original_text, target_query=target_query):
+                            st.session_state["optimized_gate"] = {"sig": sig}
+                            st.rerun()
+
+                    cache: Dict[str, Any] = st.session_state["rewrite_cache"]
+                    if sig in cache:
+                        st.session_state["last_result"] = cache[sig]
+                        st.rerun()
+
+                    st.session_state["pending_action"] = "generate"
+                    st.session_state["pending_payload"] = {
+                        "sig": sig,
+                        "original_text": original_text,
+                        "target_query": target_query,
+                        "rewrite_mode": rewrite_mode,
+                        "backend": backend,
+                        "model_name": DEFAULT_GEMINI_MODEL,
+                    }
+                    st.session_state["rewrite_inflight"] = True
+                    st.rerun()
+
+            if st.session_state.get("pending_action") == "generate" and isinstance(st.session_state.get("pending_payload"), dict):
+                payload = st.session_state["pending_payload"]
+                st.session_state["pending_action"] = None
+                st.session_state["pending_payload"] = None
+
+                with st.spinner("Génération de la version GEO en cours..."):
+                    try:
+                        res = geo_rewrite_content(
+                            original_text=payload["original_text"],
+                            target_query=payload["target_query"],
+                            model_name=payload.get("model_name"),
+                            rewrite_mode=payload["rewrite_mode"],
+                            backend=payload["backend"],
+                            user_api_key=None,
+                        )
+
+                        cd = res.get("cooldown_seconds")
+                        if cd:
+                            st.session_state["cooldown_until_ts"] = time.time() + int(cd)
+
+                        st.session_state["last_result"] = res
+                        st.session_state["rewrite_cache"][payload["sig"]] = res
+
+                        # Mémorise la signature du dernier résultat
+                        st.session_state["last_result_sig"] = payload["sig"]
+
+                        # Pop-up post-résultat: si already_optimized, on l’affiche une seule fois par sig
+                        if res.get("already_optimized"):
+                            if st.session_state.get("post_optimized_modal_sig") != payload["sig"]:
+                                st.session_state["show_post_optimized_modal"] = True
+                                st.session_state["post_optimized_modal_sig"] = payload["sig"]
+
+                    except Exception as exc:
+                        st.session_state["last_result"] = {
+                            "text": payload.get("original_text", ""),
+                            "already_optimized": False,
+                            "similarity": 0.0,
+                            "repaired": False,
+                            "violations": [],
+                            "cooldown_seconds": None,
+                            "error": f"Erreur lors de la reformulation : {exc}",
+                        }
+                    finally:
+                        st.session_state["rewrite_inflight"] = False
+                        st.session_state["force_after_optimized"] = False
+
+                st.rerun()
+
             last = st.session_state.get("last_result") or {}
             if isinstance(last, dict):
                 if last.get("repaired"):
@@ -484,7 +573,7 @@ def render_geo_reformulation_tab() -> None:
             if isinstance(last, dict):
                 result_text = (last.get("text") or "")
 
-            st.text_area("Résultat", height=520, value=result_text, disabled=True)
+            st.text_area("Résultat", height=UI_RESULT_TEXT_HEIGHT, value=result_text, disabled=True)
             copy_to_clipboard_button(result_text, key="copy_geo_optimized_text")
 
             if isinstance(last, dict) and last.get("error"):
@@ -492,88 +581,6 @@ def render_geo_reformulation_tab() -> None:
             if isinstance(last, dict) and last.get("violations"):
                 with st.expander("Voir les contrôles de conformité (violations)"):
                     st.write(last.get("violations"))
-
-    disable_generate = st.session_state["rewrite_inflight"] or cooldown_remaining > 0 or gate_matches
-    btn_label = "🧠 Générer" if not st.session_state["force_after_optimized"] else "🧠 Lancer la reformulation"
-
-    if st.button(btn_label, type="primary", disabled=disable_generate, key="btn_generate"):
-        sig = _make_sig(original_text, target_query, rewrite_mode, DEFAULT_GEMINI_MODEL, backend)
-
-        if (time.time() - float(st.session_state["last_request_ts"])) < 2.0 and sig == st.session_state["last_request_sig"]:
-            st.info("Requête identique déjà en cours / trop rapprochée. Patientez une seconde.", icon="🛑")
-        else:
-            st.session_state["last_request_sig"] = sig
-            st.session_state["last_request_ts"] = time.time()
-
-            if (not st.session_state["force_after_optimized"]) and target_query.strip() and original_text.strip():
-                if geo_is_text_already_optimized(original_text=original_text, target_query=target_query):
-                    st.session_state["optimized_gate"] = {"sig": sig}
-                    st.rerun()
-
-            cache: Dict[str, Any] = st.session_state["rewrite_cache"]
-            if sig in cache:
-                st.session_state["last_result"] = cache[sig]
-                st.rerun()
-
-            st.session_state["pending_action"] = "generate"
-            st.session_state["pending_payload"] = {
-                "sig": sig,
-                "original_text": original_text,
-                "target_query": target_query,
-                "rewrite_mode": rewrite_mode,
-                "backend": backend,
-                "model_name": DEFAULT_GEMINI_MODEL,
-            }
-            st.session_state["rewrite_inflight"] = True
-            st.rerun()
-
-    if st.session_state.get("pending_action") == "generate" and isinstance(st.session_state.get("pending_payload"), dict):
-        payload = st.session_state["pending_payload"]
-        st.session_state["pending_action"] = None
-        st.session_state["pending_payload"] = None
-
-        with st.spinner("Génération de la version GEO en cours..."):
-            try:
-                res = geo_rewrite_content(
-                    original_text=payload["original_text"],
-                    target_query=payload["target_query"],
-                    model_name=payload.get("model_name"),
-                    rewrite_mode=payload["rewrite_mode"],
-                    backend=payload["backend"],
-                    user_api_key=None,
-                )
-
-                cd = res.get("cooldown_seconds")
-                if cd:
-                    st.session_state["cooldown_until_ts"] = time.time() + int(cd)
-
-                st.session_state["last_result"] = res
-                st.session_state["rewrite_cache"][payload["sig"]] = res
-
-                # Mémorise la signature du dernier résultat
-                st.session_state["last_result_sig"] = payload["sig"]
-
-                # Pop-up post-résultat: si already_optimized, on l’affiche une seule fois par sig
-                if res.get("already_optimized"):
-                    if st.session_state.get("post_optimized_modal_sig") != payload["sig"]:
-                        st.session_state["show_post_optimized_modal"] = True
-                        st.session_state["post_optimized_modal_sig"] = payload["sig"]
-
-            except Exception as exc:
-                st.session_state["last_result"] = {
-                    "text": payload.get("original_text", ""),
-                    "already_optimized": False,
-                    "similarity": 0.0,
-                    "repaired": False,
-                    "violations": [],
-                    "cooldown_seconds": None,
-                    "error": f"Erreur lors de la reformulation : {exc}",
-                }
-            finally:
-                st.session_state["rewrite_inflight"] = False
-                st.session_state["force_after_optimized"] = False
-
-        st.rerun()
 
     st.caption(f"Modèle IA : `{DEFAULT_GEMINI_MODEL}` · Environnement : `{GEO_ENV}` · Backend IA : Gemini (forcé en production).")
 
@@ -592,7 +599,7 @@ def render_geo_monitoring_tab() -> None:
     with st.form("monitoring_form"):
         queries_text = st.text_area(
             "Requêtes (1 par ligne)",
-            height=160,
+            height=UI_MONITOR_QUERIES_HEIGHT,
             placeholder="Ex:\nmaison boisset avis\nmaison boisset histoire\nmaison boisset bourgogne",
             key="monitor_queries",
         )
