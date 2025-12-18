@@ -246,6 +246,12 @@ def render_geo_reformulation_tab() -> None:
         icon="⚠️",
     )
 
+    # -----------------------------------------------------------------
+    # SAFE DEFAULTS (évite UnboundLocalError si l'ordre de rendu change)
+    # -----------------------------------------------------------------
+    cooldown_remaining = 0
+    gate_matches = False
+
     if IS_PROD:
         backend = "gemini"
     else:
@@ -275,6 +281,9 @@ def render_geo_reformulation_tab() -> None:
                 placeholder="Ex : histoire de Maison Boisset, qui est Jean-Charles Boisset, etc.",
                 key="geo_target_query",
             )
+
+    now = time.time()
+    cooldown_remaining = max(0, int(st.session_state.get("cooldown_until_ts", 0) - now))
 
     disable_generate = st.session_state["rewrite_inflight"] or cooldown_remaining > 0 or gate_matches
     btn_label = "🧠 Générer" if not st.session_state["force_after_optimized"] else "🧠 Lancer la reformulation"
