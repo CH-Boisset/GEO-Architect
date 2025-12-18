@@ -92,7 +92,10 @@ def _init_state() -> None:
         "pending_set_mode_label": None,   # SAFE: set widget state before widget creation
         "show_post_optimized_modal": False,  # pop-up post-résultat
         "post_optimized_modal_sig": "",      # sig déjà affichée (anti boucle)
+        "post_optimized_modal_sig": "",      # sig déjà affichée (anti boucle)
         "last_result_sig": "",               # sig du dernier résultat affiché
+        "geo_target_query": "",
+        "geo_original_text": "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -280,6 +283,13 @@ def render_geo_reformulation_tab() -> None:
                 "Titre de section (ou intention / requête cible)",
                 placeholder="Ex : histoire de Maison Boisset, qui est Jean-Charles Boisset, etc.",
                 key="geo_target_query",
+            )
+
+            original_text = st.text_area(
+                "Texte original",
+                placeholder="Collez ici le texte à reformuler (texte brut).",
+                height=UI_ORIGINAL_TEXT_HEIGHT,
+                key="geo_original_text",
             )
 
     now = time.time()
