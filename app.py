@@ -30,8 +30,8 @@ from geo_utils import (
 # -----------------------------------------------------------------------------
 # UI sizing (évite le scroll initial)
 # -----------------------------------------------------------------------------
-UI_ORIGINAL_TEXT_HEIGHT = 260
-UI_RESULT_TEXT_HEIGHT = 360
+UI_ORIGINAL_TEXT_HEIGHT = 200
+UI_RESULT_TEXT_HEIGHT = 300
 UI_MONITOR_QUERIES_HEIGHT = 180
 
 # -----------------------------------------------------------------------------
@@ -91,7 +91,6 @@ def _init_state() -> None:
         "force_after_optimized": False,   # si l’utilisateur force
         "pending_set_mode_label": None,   # SAFE: set widget state before widget creation
         "show_post_optimized_modal": False,  # pop-up post-résultat
-        "post_optimized_modal_sig": "",      # sig déjà affichée (anti boucle)
         "post_optimized_modal_sig": "",      # sig déjà affichée (anti boucle)
         "last_result_sig": "",               # sig du dernier résultat affiché
         "geo_target_query": "",
