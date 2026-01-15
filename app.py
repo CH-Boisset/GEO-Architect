@@ -702,6 +702,25 @@ header[data-testid="stHeader"]{
 [data-testid="stAppViewContainer"] > .main{
   padding-top: 0 !important;
 }
+
+/* Subtitle (tagline) : s'adapte automatiquement au thème clair/sombre */
+.geo-subtitle{
+  margin-top: 0;
+  margin-bottom: 0.75rem;
+  font-size: 0.95rem;
+  color: rgba(49,51,63,0.7); /* clair par défaut */
+}
+
+/* Thème sombre */
+@media (prefers-color-scheme: dark){
+  .geo-subtitle{ color: rgba(255,255,255,0.85); }
+}
+
+/* Thème clair */
+@media (prefers-color-scheme: light){
+  .geo-subtitle{ color: rgba(49,51,63,0.7); }
+}
+
 </style>
         """,
         unsafe_allow_html=True,
@@ -712,9 +731,10 @@ header[data-testid="stHeader"]{
 <div style="margin-top:0.2rem; margin-bottom:0.25rem;">
   <h1 style="margin:0; padding:0; line-height:1.05;">GEO Architect</h1>
 </div>
-<div style="margin-top:0; margin-bottom:0.75rem; color: rgba(49,51,63,0.7); font-size:0.95rem;">
+<div class="geo-subtitle">
   MVP · Reformulation GEO + Monitoring simple
 </div>
+
         """,
         unsafe_allow_html=True,
     )
